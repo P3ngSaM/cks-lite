@@ -223,7 +223,7 @@ export const Settings = () => {
                   {userAvatar ? (
                     <img
                       src={userAvatar}
-                      alt="User Avatar"
+                      alt="用户头像"
                       className="w-full h-full object-cover"
                     />
                   ) : (
@@ -341,7 +341,7 @@ export const Settings = () => {
                   >
                     <img
                       src={avatar}
-                      alt={`Avatar ${index + 1}`}
+                      alt={`头像 ${index + 1}`}
                       className="w-full h-full object-cover"
                     />
                     {selectedAvatar === avatar && (

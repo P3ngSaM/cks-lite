@@ -11,7 +11,6 @@ export const ChatHistorySidebar = () => {
   const setCurrentSession = useChatStore((state) => state.setCurrentSession)
 
   const [hoveredSessionId, setHoveredSessionId] = useState<string | null>(null)
-
   const sessionList = Object.values(sessions).sort((a, b) => b.updatedAt - a.updatedAt)
 
   const handleNewChat = () => {
@@ -43,7 +42,6 @@ export const ChatHistorySidebar = () => {
 
   return (
     <div className="w-[260px] h-screen bg-black border-r border-neutral-800 flex flex-col">
-      {/* Header */}
       <div className="p-4 border-b border-neutral-800">
         <button
           onClick={handleNewChat}
@@ -54,7 +52,6 @@ export const ChatHistorySidebar = () => {
         </button>
       </div>
 
-      {/* Sessions List */}
       <div className="flex-1 overflow-y-auto p-3 space-y-1">
         {sessionList.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-center px-4">
@@ -88,7 +85,6 @@ export const ChatHistorySidebar = () => {
                   <p className="text-xs text-neutral-600 mt-1">{formatDate(session.updatedAt)}</p>
                 </div>
 
-                {/* Delete Button */}
                 {hoveredSessionId === session.id && (
                   <button
                     onClick={(e) => handleDeleteSession(session.id, e)}
@@ -99,7 +95,6 @@ export const ChatHistorySidebar = () => {
                 )}
               </div>
 
-              {/* Message Count */}
               {session.messages && session.messages.length > 0 && (
                 <div className="mt-2 flex items-center gap-1">
                   <MessageSquare className="h-3 w-3 text-neutral-600" />
@@ -111,7 +106,6 @@ export const ChatHistorySidebar = () => {
         )}
       </div>
 
-      {/* Footer */}
       <div className="p-4 border-t border-neutral-800">
         <div className="text-xs text-neutral-600 text-center">
           共 {sessionList.length} 个对话

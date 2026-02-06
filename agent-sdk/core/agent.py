@@ -6,9 +6,11 @@ Claude Agent 核心
 import os
 import json
 import asyncio
+from pathlib import Path
 from uuid import uuid4
 from typing import List, Dict, Optional, AsyncGenerator
 import logging
+import httpx
 from anthropic import Anthropic, AsyncAnthropic
 from anthropic.types import Message, MessageStreamEvent
 
@@ -17,6 +19,7 @@ from core.skills_loader import SkillsLoader
 from core.intelligent_memory import IntelligentMemoryExtractor
 from core.skill_executor import SkillExecutor
 from core.web_search import WebSearchService
+from core.audit_logger import AuditLogger
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +28,17 @@ DESKTOP_TOOLS = {"run_command", "read_file", "list_directory", "write_file"}
 
 # Module-level dict to store asyncio.Future objects for desktop tool results
 _desktop_results: Dict[str, asyncio.Future] = {}
+
+
+def update_repetition_state(
+    last_signature: Optional[str],
+    repeat_count: int,
+    current_signature: str,
+) -> tuple[str, int]:
+    """Update repeat counters for tool-call circuit breaker logic."""
+    if current_signature == last_signature:
+        return current_signature, repeat_count + 1
+    return current_signature, 1
 
 
 class MiniMaxAnthropic(Anthropic):
@@ -108,6 +122,13 @@ class ClaudeAgent:
         # 联网搜索服务 (UAPI 免费)
         self.web_search = WebSearchService()
         logger.info("联网搜索服务已初始化 (UAPI 免费)")
+
+        # 审计日志
+        audit_dir = getattr(self.memory_manager, "data_dir", None)
+        if audit_dir:
+            self.audit_logger = AuditLogger(Path(audit_dir) / "audit")
+        else:
+            self.audit_logger = None
 
         # 搜索意图关键词
         # search_keywords 已移至 _should_search 方法内
@@ -693,6 +714,10 @@ JSON 格式：
                 "data": {"skills": skills}
             }
 
+        # MCP 工具：支持 mcp__server__tool 与 mcp_server__tool 两种命名
+        if tool_name.startswith("mcp__") or tool_name.startswith("mcp_"):
+            return await self._execute_mcp_tool(tool_name, tool_input)
+
         # Skill 注册的工具：由 skills_loader 统一分发
         tool = self.skills_loader.registered_tools.get(tool_name)
         if tool:
@@ -709,6 +734,85 @@ JSON 格式：
             }
 
         return {"success": False, "error": f"未找到工具: {tool_name}"}
+
+    @staticmethod
+    def _normalize_mcp_tool_name(tool_name: str) -> str:
+        """Normalize MCP tool names to mcp__server__tool style when possible."""
+        if tool_name.startswith("mcp__"):
+            return tool_name
+        # Example: mcp_openaiDeveloperDocs__search_openai_docs -> mcp__openaiDeveloperDocs__search_openai_docs
+        if tool_name.startswith("mcp_"):
+            rest = tool_name[4:]
+            if "__" in rest:
+                return f"mcp__{rest}"
+        return tool_name
+
+    async def _execute_mcp_tool(self, tool_name: str, tool_input: Dict) -> Dict:
+        """Execute MCP tool via optional bridge runtime with clear diagnostics."""
+        normalized_name = self._normalize_mcp_tool_name(tool_name)
+        mcp_enabled = os.getenv("MCP_RUNTIME_ENABLED", "0") == "1"
+        bridge_url = os.getenv("MCP_BRIDGE_URL", "").strip()
+
+        if not mcp_enabled:
+            guidance = (
+                "MCP 工具运行时未启用。请配置 MCP 运行时后重试。"
+                "若你在使用 openai-docs，先执行："
+                "`codex mcp add openaiDeveloperDocs --url https://developers.openai.com/mcp`。"
+            )
+            return {
+                "success": False,
+                "error": "MCP runtime is not configured",
+                "message": guidance,
+                "data": {
+                    "tool": normalized_name,
+                    "runtime": "missing",
+                    "hint": "Set MCP_RUNTIME_ENABLED=1 and MCP_BRIDGE_URL=<your bridge endpoint>"
+                }
+            }
+
+        if not bridge_url:
+            host = os.getenv("HOST", "127.0.0.1")
+            port = int(os.getenv("PORT", 7860))
+            bridge_url = f"http://{host}:{port}/mcp/execute"
+
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(
+                    bridge_url,
+                    json={
+                        "tool_name": normalized_name,
+                        "tool_input": tool_input or {},
+                    },
+                )
+
+            if resp.status_code >= 400:
+                return {
+                    "success": False,
+                    "error": f"MCP bridge returned HTTP {resp.status_code}",
+                    "message": "MCP 桥接服务请求失败",
+                    "data": {"tool": normalized_name, "response": resp.text[:500]}
+                }
+
+            result = resp.json()
+            if not isinstance(result, dict):
+                return {
+                    "success": False,
+                    "error": "Invalid MCP bridge response",
+                    "message": "MCP 桥接服务返回了非 JSON 对象",
+                    "data": {"tool": normalized_name}
+                }
+            # Expect a tool-like result format: {"success": bool, ...}
+            if "success" not in result:
+                result["success"] = True
+            return result
+        except Exception as e:
+            logger.error(f"MCP 工具执行失败: {tool_name} -> {e}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e),
+                "message": "MCP 工具执行异常，请检查桥接服务是否可用",
+                "data": {"tool": normalized_name, "runtime": "error"}
+            }
 
     async def _execute_web_search(self, params: Dict) -> Dict:
         """内置工具：联网搜索"""
@@ -901,7 +1005,7 @@ JSON 格式：
         try:
             if use_tools:
                 # 使用非流式 API 处理工具调用
-                async for chunk in self._chat_with_tools(user_id, session_messages, system_prompt):
+                async for chunk in self._chat_with_tools(user_id, session_messages, system_prompt, session_id=session_id):
                     data = json.loads(chunk)
                     if data.get("type") == "text":
                         assistant_message += data.get("content", "")
@@ -1047,7 +1151,13 @@ JSON 格式：
         finally:
             _desktop_results.pop(request_id, None)
 
-    async def _chat_with_tools(self, user_id: str, messages: List[Dict], system_prompt: str) -> AsyncGenerator[str, None]:
+    async def _chat_with_tools(
+        self,
+        user_id: str,
+        messages: List[Dict],
+        system_prompt: str,
+        session_id: str = "default",
+    ) -> AsyncGenerator[str, None]:
         """带工具的对话（非流式处理工具调用，流式输出文本）"""
         import time
         task_start = time.time()
@@ -1055,6 +1165,11 @@ JSON 格式：
         tools = self._get_tools()
         current_messages = messages[-20:]
         max_iterations = 50  # 最大工具调用轮数
+        max_same_tool_repeats = 3  # 同一工具+同参数连续调用超过该值将触发熔断
+        max_repetition_guard_triggers = 2  # 熔断触发超过该值后直接终止循环
+        last_tool_signature = None
+        same_tool_repeat_count = 0
+        repetition_guard_triggers = 0
 
         for iteration in range(max_iterations):
             iter_start = time.time()
@@ -1104,10 +1219,55 @@ JSON 格式：
 
                 # 处理工具调用
                 tool_results = []
+                iteration_guard_triggered = False
                 for tool_block in tool_use_blocks:
                     tool_name = tool_block.name
                     tool_input = tool_block.input
                     tool_id = tool_block.id
+                    tool_signature = f"{tool_name}:{json.dumps(tool_input, ensure_ascii=False, sort_keys=True)}"
+
+                    last_tool_signature, same_tool_repeat_count = update_repetition_state(
+                        last_tool_signature,
+                        same_tool_repeat_count,
+                        tool_signature,
+                    )
+
+                    if same_tool_repeat_count > max_same_tool_repeats:
+                        repetition_guard_triggers += 1
+                        iteration_guard_triggered = True
+                        guard_error = (
+                            f"检测到工具 `{tool_name}` 使用相同参数被连续调用 "
+                            f"{same_tool_repeat_count} 次，已触发熔断保护。"
+                        )
+                        logger.warning(f"🛑 {guard_error}")
+
+                        yield json.dumps({
+                            "type": "tool_result",
+                            "tool": tool_name,
+                            "success": False,
+                            "message": guard_error,
+                            "data": {"error": guard_error, "repetition_guard": True}
+                        })
+                        if self.audit_logger:
+                            self.audit_logger.log_error(
+                                user_id=user_id,
+                                session_id=session_id,
+                                tool_name=tool_name,
+                                tool_input=tool_input,
+                                error=guard_error,
+                                duration_ms=0,
+                            )
+
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tool_id,
+                            "content": json.dumps({
+                                "success": False,
+                                "error": guard_error,
+                                "repetition_guard": True
+                            })
+                        })
+                        continue
 
                     tool_start = time.time()
                     logger.info(f"🔧 调用工具: {tool_name} (输入: {json.dumps(tool_input, ensure_ascii=False)[:100]})")
@@ -1146,6 +1306,26 @@ JSON 格式：
                             "message": desktop_result.get("content") or desktop_result.get("error", ""),
                             "data": desktop_result
                         })
+                        if self.audit_logger:
+                            msg = desktop_result.get("content") or desktop_result.get("error", "")
+                            self.audit_logger.log_execution(
+                                user_id=user_id,
+                                session_id=session_id,
+                                tool_name=tool_name,
+                                tool_input=tool_input,
+                                success=success,
+                                duration_ms=int(tool_elapsed * 1000),
+                                message=msg,
+                            )
+                            if not success:
+                                self.audit_logger.log_error(
+                                    user_id=user_id,
+                                    session_id=session_id,
+                                    tool_name=tool_name,
+                                    tool_input=tool_input,
+                                    error=desktop_result.get("error", "desktop tool failed"),
+                                    duration_ms=int(tool_elapsed * 1000),
+                                )
 
                         tool_results.append({
                             "type": "tool_result",
@@ -1168,6 +1348,26 @@ JSON 格式：
                             "message": result.get("message") or result.get("error", ""),
                             "data": result.get("data")
                         })
+                        if self.audit_logger:
+                            msg = result.get("message") or result.get("error", "")
+                            self.audit_logger.log_execution(
+                                user_id=user_id,
+                                session_id=session_id,
+                                tool_name=tool_name,
+                                tool_input=tool_input,
+                                success=success,
+                                duration_ms=int(tool_elapsed * 1000),
+                                message=msg,
+                            )
+                            if not success:
+                                self.audit_logger.log_error(
+                                    user_id=user_id,
+                                    session_id=session_id,
+                                    tool_name=tool_name,
+                                    tool_input=tool_input,
+                                    error=result.get("error", "tool failed"),
+                                    duration_ms=int(tool_elapsed * 1000),
+                                )
 
                         tool_results.append({
                             "type": "tool_result",
@@ -1184,6 +1384,15 @@ JSON 格式：
                     "role": "user",
                     "content": tool_results
                 })
+
+                if iteration_guard_triggered and repetition_guard_triggers >= max_repetition_guard_triggers:
+                    logger.warning("🛑 工具重复调用熔断触发次数过多，终止当前任务以避免死循环")
+                    yield json.dumps({
+                        "type": "text",
+                        "content": "我检测到相同工具调用反复重试，已停止自动重试以避免死循环。"
+                    })
+                    yield json.dumps({"type": "done"})
+                    return
 
                 iter_elapsed = time.time() - iter_start
                 logger.info(f"⏱️ 迭代 {iteration + 1} 完成: {iter_elapsed:.1f}s (API: {api_elapsed:.1f}s, 工具: {iter_elapsed - api_elapsed:.1f}s)")

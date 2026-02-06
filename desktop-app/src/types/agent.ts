@@ -8,6 +8,7 @@ export interface ChatRequest {
   message: string
   session_id?: string
   use_memory?: boolean
+  goal_task_id?: number
 }
 
 export interface ChatResponse {
@@ -77,6 +78,28 @@ export interface SkillInstallResult {
   error?: string
 }
 
+export type SkillReadinessStatus =
+  | 'ready'
+  | 'missing_dependency'
+  | 'blocked_by_policy'
+  | 'runtime_error'
+
+export interface SkillReadinessCheck {
+  name: string
+  ok: boolean
+  detail: string
+}
+
+export interface SkillReadiness {
+  name: string
+  display_name: string
+  source: 'pre-installed' | 'user-installed' | string
+  status: SkillReadinessStatus
+  message: string
+  required_tools: string[]
+  runtime_checks: SkillReadinessCheck[]
+}
+
 export interface SkillsResult {
   success: boolean
   skills: Skill[]
@@ -88,9 +111,144 @@ export interface SkillDetailResult {
   error?: string
 }
 
+export interface SkillReadinessResult {
+  success: boolean
+  readiness?: SkillReadiness[]
+  total?: number
+  error?: string
+}
+
+export interface SkillSmokeTestCheck {
+  name: string
+  ok: boolean
+  detail: string
+}
+
+export interface SkillSmokeTestItem {
+  success: boolean
+  skill_name: string
+  status: SkillReadinessStatus | string
+  message: string
+  checks: SkillSmokeTestCheck[]
+}
+
+export interface SkillSmokeTestResult {
+  success: boolean
+  results?: SkillSmokeTestItem[]
+  summary?: {
+    total: number
+    passed: number
+    failed: number
+  }
+  error?: string
+}
+
+export interface AuditRecord {
+  timestamp: string
+  session_id?: string
+  user_input?: string
+  tool_name?: string
+  tool_input?: Record<string, any>
+  success?: boolean
+  message?: string
+  data?: any
+  error?: string
+  [key: string]: any
+}
+
+export interface AuditRecordsResult {
+  success: boolean
+  records?: AuditRecord[]
+  total?: number
+  error?: string
+}
+
 export interface SkillContextResult {
   success: boolean
   context?: string
+  error?: string
+}
+
+// Goals Types
+export interface GoalTask {
+  id: number
+  project_id: number
+  title: string
+  description: string
+  assignee: string
+  status: string
+  progress: number
+  created_at: string
+  updated_at: string
+}
+
+export interface GoalTaskListItem extends GoalTask {
+  project_title: string
+  okr_title: string
+  kpi_title: string
+}
+
+export interface GoalProject {
+  id: number
+  okr_id: number
+  title: string
+  description: string
+  status: string
+  progress: number
+  created_at: string
+  updated_at: string
+  tasks: GoalTask[]
+}
+
+export interface GoalOKR {
+  id: number
+  kpi_id: number
+  title: string
+  description: string
+  status: string
+  progress: number
+  created_at: string
+  updated_at: string
+  projects: GoalProject[]
+}
+
+export interface GoalKPI {
+  id: number
+  title: string
+  description: string
+  status: string
+  progress: number
+  created_at: string
+  updated_at: string
+  okrs: GoalOKR[]
+}
+
+export interface GoalsTree {
+  kpis: GoalKPI[]
+  total_kpis: number
+}
+
+export interface GoalsTreeResult {
+  success: boolean
+  data?: GoalsTree
+  error?: string
+}
+
+export interface GoalCreateResult {
+  success: boolean
+  id?: number
+  error?: string
+}
+
+export interface GoalActionResult {
+  success: boolean
+  error?: string
+}
+
+export interface GoalTaskListResult {
+  success: boolean
+  tasks?: GoalTaskListItem[]
+  total?: number
   error?: string
 }
 

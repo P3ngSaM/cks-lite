@@ -5,7 +5,11 @@ CKS Lite Agent SDK - Main Entry Point
 
 import os
 import sys
+import re
+import json
+import httpx
 from pathlib import Path
+from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,7 +25,18 @@ from core.memory import MemoryManager
 from core.skills_loader import SkillsLoader
 from core.skill_installer import SkillInstaller
 from core.web_search import WebSearchService
-from models.request import ChatRequest, MemoryRequest, SkillInstallRequest
+from core.goal_manager import GoalManager
+from models.request import (
+    ChatRequest,
+    MemoryRequest,
+    SkillInstallRequest,
+    SkillExecuteRequest,
+    MCPExecuteRequest,
+    GoalKPIRequest,
+    GoalOKRRequest,
+    GoalProjectRequest,
+    GoalTaskRequest,
+)
 from models.response import ChatResponse, MemoryResponse
 
 # 加载环境变量（override=True 确保 .env 文件优先级高于系统环境变量）
@@ -42,17 +57,24 @@ app = FastAPI(
 )
 
 # CORS 配置（允许 Tauri 访问）
+default_cors_origins = [
+    "tauri://localhost",
+    "http://localhost:1420",
+    "http://127.0.0.1:1420",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+cors_origins = os.getenv("CORS_ALLOW_ORIGINS", "").strip()
+if cors_origins:
+    allow_origins = [item.strip() for item in cors_origins.split(",") if item.strip()]
+else:
+    allow_origins = default_cors_origins
+
+allow_credentials = "*" not in allow_origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "tauri://localhost",
-        "http://localhost:1420",
-        "http://127.0.0.1:1420",
-        "http://localhost:5173",  # Vite 默认端口
-        "http://127.0.0.1:5173",
-        "*"  # 开发环境允许所有来源
-    ],
-    allow_credentials=True,
+    allow_origins=allow_origins,
+    allow_credentials=allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -62,6 +84,7 @@ DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))
 DATA_DIR.mkdir(exist_ok=True)
 
 memory_manager = MemoryManager(data_dir=DATA_DIR)
+goal_manager = GoalManager(data_dir=DATA_DIR)
 
 # Skills 加载：扫描 agent-sdk/skills/ 和 .claude/skills/ 两个目录
 # .claude/skills/ 包含从 Claude Code 安装的社区技能
@@ -81,7 +104,7 @@ agent = ClaudeAgent(
 
 # Auto-check office document dependencies on first startup
 def _check_office_deps():
-    """Check and install missing office document packages at startup."""
+    """Check office document packages at startup."""
     deps = {
         "openpyxl": "openpyxl", "pptx": "python-pptx", "docx": "python-docx",
         "fitz": "PyMuPDF", "matplotlib": "matplotlib", "PIL": "Pillow",
@@ -94,18 +117,28 @@ def _check_office_deps():
         except ImportError:
             missing.append(pip_name)
 
-    if missing:
-        logger.info(f"Installing missing office packages: {', '.join(missing)}")
-        import subprocess
-        for pkg in missing:
-            try:
-                subprocess.run(
-                    [sys.executable, "-m", "pip", "install", pkg, "-q"],
-                    capture_output=True, timeout=120
-                )
-                logger.info(f"  Installed {pkg}")
-            except Exception as e:
-                logger.warning(f"  Failed to install {pkg}: {e}")
+    if not missing:
+        return
+
+    auto_install = os.getenv("CKS_AUTO_INSTALL_DEPS", "0") == "1"
+    if not auto_install:
+        logger.warning(
+            "Missing office packages: %s. Auto install disabled; set CKS_AUTO_INSTALL_DEPS=1 to enable.",
+            ", ".join(missing)
+        )
+        return
+
+    logger.info(f"Installing missing office packages: {', '.join(missing)}")
+    import subprocess
+    for pkg in missing:
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", pkg, "-q"],
+                capture_output=True, timeout=120
+            )
+            logger.info(f"  Installed {pkg}")
+        except Exception as e:
+            logger.warning(f"  Failed to install {pkg}: {e}")
 
 _check_office_deps()
 
@@ -139,6 +172,170 @@ logger.info(f"数据目录: {DATA_DIR.absolute()}")
 logger.info(f"已加载 Skills: {len(skills_loader.skills)} 个")
 
 
+def _extract_mcp_tools_from_skill_md(skill_path: Path) -> list[str]:
+    """Extract MCP tool references from SKILL.md for readiness diagnostics."""
+    skill_md = skill_path / "SKILL.md"
+    if not skill_md.exists():
+        return []
+
+    try:
+        content = skill_md.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return []
+
+    # Supports both mcp_server_tool and mcp__server__tool patterns.
+    pattern = r"(mcp__[a-zA-Z0-9_]+__[a-zA-Z0-9_]+|mcp_[a-zA-Z0-9_]+(?:__[a-zA-Z0-9_]+)*)"
+    seen = set()
+    results = []
+    for match in re.finditer(pattern, content):
+        name = match.group(1)
+        if name not in seen:
+            seen.add(name)
+            results.append(name)
+    return results
+
+
+def _check_skill_readiness(skill) -> dict:
+    """
+    Build a lightweight readiness report for a skill.
+
+    Status values:
+    - ready
+    - missing_dependency
+    - blocked_by_policy
+    - runtime_error
+    """
+    status = "ready"
+    message = "Skill is ready"
+    required_tools = []
+    runtime_checks = []
+
+    # 1) Declared plugin tools from template.json
+    if getattr(skill, "tools", None):
+        for tool in skill.tools:
+            required_tools.append(tool.name)
+            if tool.entrypoint:
+                module_path = tool.entrypoint.split(":")[0]
+                module_file = skill.path / (module_path.replace(".", "/") + ".py")
+                module_exists = module_file.exists()
+                runtime_checks.append({
+                    "name": f"entrypoint:{tool.name}",
+                    "ok": module_exists,
+                    "detail": str(module_file),
+                })
+                if not module_exists and status == "ready":
+                    status = "missing_dependency"
+                    message = f"Tool entrypoint file missing: {module_file.name}"
+
+    # 2) MCP tool references from SKILL.md (e.g., openai-docs)
+    mcp_tools = _extract_mcp_tools_from_skill_md(skill.path)
+    if mcp_tools:
+        required_tools.extend(mcp_tools)
+        mcp_runtime_enabled = os.getenv("MCP_RUNTIME_ENABLED", "0") == "1"
+        bridge_url = os.getenv("MCP_BRIDGE_URL", "").strip()
+        if not bridge_url:
+            host = os.getenv("HOST", "127.0.0.1")
+            port = int(os.getenv("PORT", 7860))
+            bridge_url = f"http://{host}:{port}/mcp/execute"
+        runtime_checks.append({
+            "name": "mcp_runtime",
+            "ok": mcp_runtime_enabled,
+            "detail": "Set MCP_RUNTIME_ENABLED=1 and configure MCP bridge/runtime",
+        })
+        runtime_checks.append({
+            "name": "mcp_bridge_url",
+            "ok": bool(bridge_url),
+            "detail": bridge_url,
+        })
+        if not mcp_runtime_enabled and status == "ready":
+            status = "missing_dependency"
+            message = "MCP runtime is not configured"
+
+    # 3) Optional policy block switch for emergency control
+    if os.getenv("DISABLE_SKILLS_EXECUTION", "0") == "1":
+        status = "blocked_by_policy"
+        message = "Skills execution is disabled by policy (DISABLE_SKILLS_EXECUTION=1)"
+        runtime_checks.append({
+            "name": "skills_execution_policy",
+            "ok": False,
+            "detail": "DISABLE_SKILLS_EXECUTION=1",
+        })
+
+    # 4) Deduplicate required tools and keep stable output
+    dedup_required = []
+    seen_required = set()
+    for t in required_tools:
+        if t not in seen_required:
+            seen_required.add(t)
+            dedup_required.append(t)
+
+    return {
+        "name": skill.name,
+        "display_name": skill.display_name,
+        "source": getattr(skill, "source", "pre-installed"),
+        "status": status,
+        "message": message,
+        "required_tools": dedup_required,
+        "runtime_checks": runtime_checks,
+    }
+
+
+async def _run_skill_smoke_test(skill_name: str) -> dict:
+    """Run a lightweight smoke test for a single skill."""
+    skill = skills_loader.get_skill(skill_name)
+    if not skill:
+        return {"success": False, "error": f"Skill 不存在: {skill_name}"}
+
+    readiness = _check_skill_readiness(skill)
+    if readiness["status"] != "ready":
+        return {
+            "success": False,
+            "skill_name": skill_name,
+            "status": readiness["status"],
+            "message": readiness["message"],
+            "checks": readiness["runtime_checks"],
+        }
+
+    # Context-only validation: SKILL.md readable when has_skill is true.
+    context_ok = True
+    context_len = 0
+    if skill.has_skill:
+        context = agent.skill_executor.get_skill_context(skill_name)
+        context_ok = context is not None
+        context_len = len(context or "")
+
+    checks = [
+        {"name": "skill_exists", "ok": True, "detail": str(skill.path)},
+        {"name": "readiness_status", "ok": True, "detail": "ready"},
+        {"name": "skill_context", "ok": context_ok, "detail": f"length={context_len}"},
+    ]
+
+    # Optional live probe for find-skills
+    if skill_name in ("find-skills", "find_skills"):
+        try:
+            probe = await skill_installer.search_skills("productivity", limit=3)
+            checks.append({
+                "name": "live_probe_find_skills",
+                "ok": isinstance(probe, list),
+                "detail": f"results={len(probe) if isinstance(probe, list) else 0}",
+            })
+        except Exception as e:
+            checks.append({
+                "name": "live_probe_find_skills",
+                "ok": False,
+                "detail": str(e),
+            })
+
+    all_ok = all(c["ok"] for c in checks)
+    return {
+        "success": all_ok,
+        "skill_name": skill_name,
+        "status": "ready" if all_ok else "runtime_error",
+        "message": "Smoke test passed" if all_ok else "Smoke test failed",
+        "checks": checks,
+    }
+
+
 @app.get("/")
 async def root():
     """健康检查"""
@@ -161,6 +358,9 @@ async def chat(request: ChatRequest):
             use_memory=request.use_memory
         )
 
+        if request.goal_task_id and response.get("tool_calls"):
+            goal_manager.complete_task(request.goal_task_id)
+
         return ChatResponse(
             message=response["message"],
             tool_calls=response.get("tool_calls", []),
@@ -177,8 +377,9 @@ async def chat(request: ChatRequest):
 
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
-    """对话接口（流式）"""
+    """????????????"""
     async def generate():
+        has_successful_tool = False
         try:
             async for chunk in agent.chat_stream(
                 user_id=request.user_id,
@@ -186,9 +387,21 @@ async def chat_stream(request: ChatRequest):
                 session_id=request.session_id,
                 use_memory=request.use_memory
             ):
+                try:
+                    parsed = json.loads(chunk)
+                    if parsed.get("type") == "tool_result" and parsed.get("success"):
+                        has_successful_tool = True
+                    if (
+                        parsed.get("type") == "done"
+                        and request.goal_task_id
+                        and has_successful_tool
+                    ):
+                        goal_manager.complete_task(request.goal_task_id)
+                except Exception:
+                    pass
                 yield f"data: {chunk}\n\n"
         except Exception as e:
-            logger.error(f"流式对话错误: {e}", exc_info=True)
+            logger.error(f"?????????: {e}", exc_info=True)
             yield f"data: {{\"error\": \"{str(e)}\"}}\n\n"
 
     return StreamingResponse(
@@ -466,6 +679,326 @@ async def list_skills():
     }
 
 
+@app.get("/health")
+async def health():
+    """健康检查（兼容路径）"""
+    return await root()
+
+
+async def _probe_mcp_bridge(bridge_url: str) -> tuple[bool, str]:
+    """Probe MCP bridge reachability with a lightweight request."""
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.post(
+                bridge_url,
+                json={"tool_name": "mcp__probe__ping", "tool_input": {}},
+            )
+        if resp.status_code in (200, 400):
+            return True, f"http={resp.status_code}"
+        return False, f"http={resp.status_code}"
+    except Exception as e:
+        return False, str(e)
+
+
+def _iter_file_lines_reverse(file_path: Path, chunk_size: int = 8192):
+    """Yield file lines in reverse order without loading the full file into memory."""
+    with open(file_path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        file_size = f.tell()
+        buffer = b""
+        pos = file_size
+
+        while pos > 0:
+            read_size = min(chunk_size, pos)
+            pos -= read_size
+            f.seek(pos)
+            chunk = f.read(read_size)
+            buffer = chunk + buffer
+            lines = buffer.split(b"\n")
+            buffer = lines[0]
+            for line in reversed(lines[1:]):
+                if line:
+                    yield line.decode("utf-8", errors="ignore")
+
+        if buffer:
+            yield buffer.decode("utf-8", errors="ignore")
+
+
+def _read_audit_records(
+    kind: str,
+    session_id: str = None,
+    tool_name: str = None,
+    from_time: str = None,
+    to_time: str = None,
+    limit: int = 100
+) -> list:
+    """
+    Read audit JSONL records from data/audit.
+    kind: execution | error
+    """
+    limit = max(1, min(limit, 1000))
+    audit_dir = memory_manager.data_dir / "audit"
+    if not audit_dir.exists():
+        return []
+
+    pattern = f"{kind}-*.jsonl"
+    files = sorted(audit_dir.glob(pattern), reverse=True)
+    records = []
+
+    def parse_dt(value: str):
+        if not value:
+            return None
+        try:
+            normalized = value.replace("Z", "+00:00")
+            return datetime.fromisoformat(normalized)
+        except Exception:
+            return None
+
+    from_dt = parse_dt(from_time)
+    to_dt = parse_dt(to_time)
+
+    for file in files:
+        try:
+            line_iter = _iter_file_lines_reverse(file)
+        except Exception:
+            continue
+
+        for line in line_iter:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+
+            # Backward-compatible key mapping for old/new audit schema
+            if "timestamp" not in row and "ts" in row:
+                row["timestamp"] = row.get("ts")
+            if "tool_name" not in row and "tool" in row:
+                row["tool_name"] = row.get("tool")
+            if "tool_input" not in row and "input" in row:
+                row["tool_input"] = row.get("input")
+
+            if session_id and row.get("session_id") != session_id:
+                continue
+
+            normalized_tool_name = row.get("tool_name") or row.get("tool")
+            if tool_name and normalized_tool_name != tool_name:
+                continue
+
+            row_time = parse_dt(row.get("timestamp") or row.get("ts"))
+            if from_dt and row_time and row_time < from_dt:
+                continue
+            if to_dt and row_time and row_time > to_dt:
+                continue
+
+            records.append(row)
+            if len(records) >= limit:
+                return records
+
+    return records
+
+
+@app.get("/skills/readiness")
+async def list_skills_readiness(skill_name: str = None):
+    """Skill readiness diagnostics."""
+    try:
+        async def with_mcp_probe(row: dict) -> dict:
+            has_mcp_tools = any(t.startswith("mcp_") or t.startswith("mcp__") for t in row.get("required_tools", []))
+            mcp_enabled = os.getenv("MCP_RUNTIME_ENABLED", "0") == "1"
+            if not has_mcp_tools or not mcp_enabled:
+                return row
+
+            bridge_url = os.getenv("MCP_BRIDGE_URL", "").strip()
+            if not bridge_url:
+                host = os.getenv("HOST", "127.0.0.1")
+                port = int(os.getenv("PORT", 7860))
+                bridge_url = f"http://{host}:{port}/mcp/execute"
+
+            ok, detail = await _probe_mcp_bridge(bridge_url)
+            checks = row.get("runtime_checks", [])
+            checks.append({
+                "name": "mcp_bridge_reachable",
+                "ok": ok,
+                "detail": detail,
+            })
+            row["runtime_checks"] = checks
+            if not ok:
+                row["status"] = "runtime_error"
+                row["message"] = "MCP bridge is not reachable"
+            return row
+
+        if skill_name:
+            skill = skills_loader.get_skill(skill_name)
+            if not skill:
+                return {"success": False, "error": f"Skill 不存在: {skill_name}"}
+            row = _check_skill_readiness(skill)
+            row = await with_mcp_probe(row)
+            return {"success": True, "readiness": [row]}
+
+        readiness = []
+        for skill in skills_loader.skills:
+            row = _check_skill_readiness(skill)
+            row = await with_mcp_probe(row)
+            readiness.append(row)
+        return {"success": True, "readiness": readiness, "total": len(readiness)}
+    except Exception as e:
+        logger.error(f"获取 Skill readiness 失败: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/audit/executions")
+async def get_audit_executions(
+    session_id: str = None,
+    tool_name: str = None,
+    from_time: str = None,
+    to_time: str = None,
+    limit: int = 100
+):
+    """查询工具执行审计日志"""
+    try:
+        rows = _read_audit_records(
+            "execution",
+            session_id=session_id,
+            tool_name=tool_name,
+            from_time=from_time,
+            to_time=to_time,
+            limit=limit
+        )
+        return {"success": True, "records": rows, "total": len(rows)}
+    except Exception as e:
+        logger.error(f"读取 execution 审计日志失败: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/audit/errors")
+async def get_audit_errors(
+    session_id: str = None,
+    tool_name: str = None,
+    from_time: str = None,
+    to_time: str = None,
+    limit: int = 100
+):
+    """查询工具错误审计日志"""
+    try:
+        rows = _read_audit_records(
+            "error",
+            session_id=session_id,
+            tool_name=tool_name,
+            from_time=from_time,
+            to_time=to_time,
+            limit=limit
+        )
+        return {"success": True, "records": rows, "total": len(rows)}
+    except Exception as e:
+        logger.error(f"读取 error 审计日志失败: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/skills/smoke-test")
+async def smoke_test_skill(skill_name: str = None):
+    """Run smoke test for one skill or all skills."""
+    try:
+        if skill_name:
+            result = await _run_skill_smoke_test(skill_name)
+            return {"success": result.get("success", False), "results": [result]}
+
+        results = []
+        for skill in skills_loader.skills:
+            results.append(await _run_skill_smoke_test(skill.name))
+        passed = len([r for r in results if r.get("success")])
+        return {
+            "success": True,
+            "results": results,
+            "summary": {
+                "total": len(results),
+                "passed": passed,
+                "failed": len(results) - passed,
+            }
+        }
+    except Exception as e:
+        logger.error(f"Skill smoke test 失败: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/mcp/execute")
+async def mcp_execute(request: MCPExecuteRequest):
+    """
+    Local MCP bridge endpoint.
+    This is a pragmatic fallback bridge for MCP-dependent skills before full MCP runtime integration.
+    """
+    try:
+        tool_name = request.tool_name
+        tool_input = request.tool_input or {}
+
+        # Current fallback implementation for openaiDeveloperDocs MCP tools:
+        # map MCP calls to domain-limited web search on developers.openai.com
+        if "openaiDeveloperDocs" in tool_name:
+            query = (
+                tool_input.get("query")
+                or tool_input.get("doc_id")
+                or tool_input.get("path")
+                or "OpenAI developer docs"
+            )
+
+            response = await agent.web_search.search(
+                query=str(query),
+                num_results=5,
+                site="developers.openai.com",
+                time_range=None
+            )
+
+            if not response.success:
+                return {
+                    "success": False,
+                    "error": response.error or "Search failed",
+                    "message": "openai docs fallback search failed"
+                }
+
+            if "search_openai_docs" in tool_name or "list_openai_docs" in tool_name:
+                rows = []
+                for i, r in enumerate(response.results, 1):
+                    rows.append(f"{i}. {r.title}\n   {r.url}\n   {r.snippet[:220]}")
+                return {
+                    "success": True,
+                    "message": f"找到 {len(response.results)} 条 OpenAI 文档结果（fallback）",
+                    "content": "\n\n".join(rows),
+                    "data": {
+                        "mode": "fallback_web_search",
+                        "results": [
+                            {"title": r.title, "url": r.url, "snippet": r.snippet}
+                            for r in response.results
+                        ]
+                    }
+                }
+
+            # fetch_openai_doc fallback: return top result content/snippet
+            top = response.results[0] if response.results else None
+            return {
+                "success": bool(top),
+                "message": "返回最相关文档（fallback）" if top else "未找到文档",
+                "content": (top.content or top.snippet) if top else "",
+                "data": {
+                    "mode": "fallback_web_search",
+                    "doc": {
+                        "title": top.title,
+                        "url": top.url,
+                        "content": top.content or top.snippet
+                    } if top else None
+                }
+            }
+
+        return {
+            "success": False,
+            "error": f"Unsupported MCP tool: {tool_name}",
+            "message": "本地 MCP bridge 暂未支持该工具，请接入完整 MCP runtime。"
+        }
+    except Exception as e:
+        logger.error(f"MCP execute 错误: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
 @app.get("/skills/{skill_name}")
 async def get_skill(skill_name: str):
     """获取 Skill 详情"""
@@ -487,13 +1020,30 @@ async def get_skill_context(skill_name: str):
 
 
 @app.post("/skills/execute")
-async def execute_skill(skill_name: str, script_name: str, args: list = None):
+async def execute_skill(
+    request: SkillExecuteRequest = None,
+    skill_name: str = None,
+    script_name: str = None,
+):
     """执行 Skill 脚本"""
     try:
+        # 兼容两种调用方式：
+        # 1) 现代方式：全部参数走 JSON body
+        # 2) 旧方式：skill_name/script_name 在 query，args 在 body
+        resolved_skill_name = (request.skill_name if request else None) or skill_name
+        resolved_script_name = (request.script_name if request else None) or script_name
+        resolved_args = (request.args if request else None) or []
+
+        if not resolved_skill_name or not resolved_script_name:
+            return {
+                "success": False,
+                "error": "缺少参数: skill_name 和 script_name 必填"
+            }
+
         success, stdout, stderr = await agent.skill_executor.execute_script(
-            skill_name=skill_name,
-            script_name=script_name,
-            args=args or []
+            skill_name=resolved_skill_name,
+            script_name=resolved_script_name,
+            args=resolved_args
         )
 
         return {
@@ -607,6 +1157,95 @@ async def web_search(
         }
     except Exception as e:
         logger.error(f"联网搜索错误: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/goals/tree")
+async def get_goals_tree():
+    """获取 KPI/OKR/项目/任务树"""
+    try:
+        return {"success": True, "data": goal_manager.get_tree()}
+    except Exception as e:
+        logger.error(f"获取 goals tree 失败: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/goals/tasks")
+async def list_goal_tasks(
+    assignee: str = None,
+    status: str = None,
+    from_time: str = None,
+    to_time: str = None,
+    limit: int = 200,
+):
+    try:
+        rows = goal_manager.list_tasks(
+            assignee=assignee,
+            status=status,
+            from_time=from_time,
+            to_time=to_time,
+            limit=limit,
+        )
+        return {"success": True, "tasks": rows, "total": len(rows)}
+    except Exception as e:
+        logger.error(f"List goals tasks failed: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/goals/kpi")
+async def create_kpi(request: GoalKPIRequest):
+    try:
+        kpi_id = goal_manager.create_kpi(request.title, request.description)
+        return {"success": True, "id": kpi_id}
+    except Exception as e:
+        logger.error(f"创建 KPI 失败: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/goals/okr")
+async def create_okr(request: GoalOKRRequest):
+    try:
+        okr_id = goal_manager.create_okr(request.kpi_id, request.title, request.description)
+        return {"success": True, "id": okr_id}
+    except Exception as e:
+        logger.error(f"创建 OKR 失败: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/goals/project")
+async def create_project(request: GoalProjectRequest):
+    try:
+        project_id = goal_manager.create_project(request.okr_id, request.title, request.description)
+        return {"success": True, "id": project_id}
+    except Exception as e:
+        logger.error(f"创建项目失败: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/goals/task")
+async def create_task(request: GoalTaskRequest):
+    try:
+        task_id = goal_manager.create_task(
+            project_id=request.project_id,
+            title=request.title,
+            description=request.description,
+            assignee=request.assignee,
+        )
+        return {"success": True, "id": task_id}
+    except Exception as e:
+        logger.error(f"创建任务失败: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/goals/task/{task_id}/complete")
+async def complete_task(task_id: int):
+    try:
+        ok = goal_manager.complete_task(task_id)
+        if not ok:
+            return {"success": False, "error": "Task not found"}
+        return {"success": True}
+    except Exception as e:
+        logger.error(f"完成任务失败: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
 

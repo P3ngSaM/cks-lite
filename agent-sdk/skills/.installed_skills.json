@@ -1,1 +1,51 @@
-{}
+{
+  "find-skills": {
+    "owner": "vercel-labs",
+    "repo": "skills",
+    "path": "skills/find-skills",
+    "installed_at": "2026-02-06T21:26:31.343047",
+    "github_url": "https://github.com/vercel-labs/skills"
+  },
+  "playwright": {
+    "owner": "openai",
+    "repo": "skills",
+    "path": "skills/.curated/playwright",
+    "installed_at": "2026-02-06T21:26:58.912755",
+    "github_url": "https://github.com/openai/skills"
+  },
+  "screenshot": {
+    "owner": "openai",
+    "repo": "skills",
+    "path": "skills/.curated/screenshot",
+    "installed_at": "2026-02-06T21:27:24.293583",
+    "github_url": "https://github.com/openai/skills"
+  },
+  "openai-docs": {
+    "owner": "openai",
+    "repo": "skills",
+    "path": "skills/.curated/openai-docs",
+    "installed_at": "2026-02-06T21:39:34.895424",
+    "github_url": "https://github.com/openai/skills"
+  },
+  "transcribe": {
+    "owner": "openai",
+    "repo": "skills",
+    "path": "skills/.curated/transcribe",
+    "installed_at": "2026-02-06T21:39:39.708332",
+    "github_url": "https://github.com/openai/skills"
+  },
+  "security-best-practices": {
+    "owner": "openai",
+    "repo": "skills",
+    "path": "skills/.curated/security-best-practices",
+    "installed_at": "2026-02-06T21:39:50.449797",
+    "github_url": "https://github.com/openai/skills"
+  },
+  "spreadsheet": {
+    "owner": "openai",
+    "repo": "skills",
+    "path": "skills/.curated/spreadsheet",
+    "installed_at": "2026-02-06T21:39:56.085359",
+    "github_url": "https://github.com/openai/skills"
+  }
+}

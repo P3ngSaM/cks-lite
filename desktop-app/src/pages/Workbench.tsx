@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ChatHistorySidebar } from '@/components/layout/ChatHistorySidebar'
 import { MessageList, ChatInput } from '@/components/chat'
 import { PermissionApprovalDialog } from '@/components/chat/PermissionApprovalDialog'
@@ -46,8 +46,8 @@ export const Workbench = () => {
 
   const permissionRequests = usePermissionStore((state) => state.pendingRequests)
   const addPermissionRequest = usePermissionStore((state) => state.addRequest)
-  const autoApproveAll = usePermissionStore((state) => state.autoApproveAll)
   const setAutoApproveAll = usePermissionStore((state) => state.setAutoApproveAll)
+  const [activeGoalTaskId, setActiveGoalTaskId] = useState<number | null>(null)
 
   // 响应式获取当前会话的消息
   const messages = useMemo(() => {
@@ -74,6 +74,17 @@ export const Workbench = () => {
       addMessage(greetingMessage)
     }
   }, []) // Only run once on mount
+
+  useEffect(() => {
+    const sync = () => {
+      const raw = localStorage.getItem('cks.activeGoalTaskId')
+      const parsed = raw ? Number(raw) : NaN
+      setActiveGoalTaskId(Number.isFinite(parsed) ? parsed : null)
+    }
+    sync()
+    window.addEventListener('storage', sync)
+    return () => window.removeEventListener('storage', sync)
+  }, [])
 
   const handleSendMessage = useCallback(async (content: string) => {
     // Reset auto-approve for each new user message
@@ -132,7 +143,8 @@ export const Workbench = () => {
         user_id: 'default-user',
         message: content,
         session_id: currentSessionId || 'default',
-        use_memory: true
+        use_memory: true,
+        goal_task_id: activeGoalTaskId || undefined
       })) {
         // Handle different chunk types based on type field
         // Only throw for fatal errors, not for search_error which is recoverable
@@ -359,6 +371,11 @@ export const Workbench = () => {
               与 CKS Assistant 智能对话
             </p>
           </div>
+          {activeGoalTaskId && (
+            <div className="text-xs text-blue-300 bg-blue-500/10 border border-blue-500/30 rounded px-2 py-1">
+              已绑定目标任务 #{activeGoalTaskId}（执行成功自动回写）
+            </div>
+          )}
         </div>
 
         {/* Messages Area */}

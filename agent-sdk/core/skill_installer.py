@@ -341,7 +341,7 @@ class SkillInstaller:
         tar_path.write_bytes(response.content)
 
         with tarfile.open(tar_path, "r:gz") as tar:
-            tar.extractall(path=dest)
+            self._safe_extract_tar(tar, dest)
 
         tar_path.unlink()
 
@@ -352,6 +352,30 @@ class SkillInstaller:
             # 将内容移到以 repo 名命名的目录
             repo_dir = dest / repo
             extracted.rename(repo_dir)
+
+    @staticmethod
+    def _safe_extract_tar(tar: tarfile.TarFile, dest: Path):
+        """
+        Safely extract tar members and block path traversal.
+        """
+        dest_resolved = dest.resolve()
+        safe_members = []
+        for member in tar.getmembers():
+            member_path = dest / member.name
+            try:
+                member_resolved = member_path.resolve()
+            except Exception:
+                logger.warning(f"跳过不可解析 tar 条目: {member.name}")
+                continue
+
+            try:
+                member_resolved.relative_to(dest_resolved)
+            except Exception:
+                logger.warning(f"跳过潜在路径穿越 tar 条目: {member.name}")
+                continue
+            safe_members.append(member)
+
+        tar.extractall(path=dest, members=safe_members)
 
     # ── 技能定位与验证 ────────────────────────────────────────
 

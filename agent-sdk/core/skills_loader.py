@@ -11,8 +11,11 @@ from pathlib import Path
 from typing import List, Dict, Optional, Any
 import logging
 import re
+import threading
+from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
+_skill_import_lock = threading.RLock()
 
 
 class SkillTool:
@@ -42,6 +45,27 @@ class SkillTool:
             "input_schema": self.parameters
         }
 
+    @contextmanager
+    def _skill_import_path(self):
+        """
+        Safely expose a skill directory to Python imports.
+        This avoids leaking temporary sys.path mutations when multiple tools run concurrently.
+        """
+        skill_str = str(self.skill_path)
+        inserted = False
+        with _skill_import_lock:
+            if skill_str not in sys.path:
+                sys.path.insert(0, skill_str)
+                inserted = True
+            try:
+                yield
+            finally:
+                if inserted:
+                    try:
+                        sys.path.remove(skill_str)
+                    except ValueError:
+                        pass
+
     def execute(self, params: Dict) -> Dict:
         """执行工具"""
         if not self.entrypoint or not self.method:
@@ -50,23 +74,14 @@ class SkillTool:
         try:
             # 解析 entrypoint: "app.email_service:EmailService"
             module_path, class_name = self.entrypoint.split(":")
+            with self._skill_import_path():
+                # 动态导入模块和类
+                module = importlib.import_module(module_path)
+                cls = getattr(module, class_name)
 
-            # 添加 skill 路径到 sys.path
-            skill_str = str(self.skill_path)
-            if skill_str not in sys.path:
-                sys.path.insert(0, skill_str)
-
-            # 动态导入模块和类
-            module = importlib.import_module(module_path)
-            cls = getattr(module, class_name)
-
-            # 调用方法
-            method_fn = getattr(cls, self.method)
-            result = method_fn(params)
-
-            # 清理 sys.path
-            if skill_str in sys.path:
-                sys.path.remove(skill_str)
+                # 调用方法
+                method_fn = getattr(cls, self.method)
+                result = method_fn(params)
 
             return result
 

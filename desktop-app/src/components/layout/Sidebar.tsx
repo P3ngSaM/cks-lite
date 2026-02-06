@@ -1,5 +1,5 @@
 import { Link, useLocation } from 'react-router-dom'
-import { MessageSquare, Brain, Zap, Settings } from 'lucide-react'
+import { MessageSquare, Brain, Zap, Target, Settings } from 'lucide-react'
 import { cn } from '@/utils/cn'
 
 interface NavItem {
@@ -23,6 +23,11 @@ const navItems: NavItem[] = [
     name: '技能',
     path: '/skills',
     icon: <Zap className="h-5 w-5" />
+  },
+  {
+    name: '目标',
+    path: '/goals',
+    icon: <Target className="h-5 w-5" />
   }
 ]
 
@@ -31,7 +36,6 @@ export const Sidebar = () => {
 
   return (
     <aside className="w-16 h-screen bg-black border-r border-neutral-800 flex flex-col items-center py-6">
-      {/* Logo */}
       <div className="mb-8">
         <img
           src="/src/img/cks.png"
@@ -40,7 +44,6 @@ export const Sidebar = () => {
         />
       </div>
 
-      {/* Navigation */}
       <nav className="flex-1 flex flex-col gap-2">
         {navItems.map((item) => {
           const isActive = location.pathname === item.path
@@ -57,13 +60,9 @@ export const Sidebar = () => {
               title={item.name}
             >
               {item.icon}
-
-              {/* Tooltip */}
               <div className="absolute left-full ml-2 px-3 py-1.5 bg-neutral-800 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap">
                 {item.name}
               </div>
-
-              {/* Active Indicator */}
               {isActive && (
                 <div className="absolute left-0 w-0.5 h-6 bg-white rounded-r-full" />
               )}
@@ -72,15 +71,12 @@ export const Sidebar = () => {
         })}
       </nav>
 
-      {/* Settings */}
       <Link
         to="/settings"
         className="w-12 h-12 flex items-center justify-center rounded-lg text-neutral-500 hover:text-white hover:bg-neutral-900 transition-colors relative group"
         title="设置"
       >
         <Settings className="h-5 w-5" />
-
-        {/* Tooltip */}
         <div className="absolute left-full ml-2 px-3 py-1.5 bg-neutral-800 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap">
           设置
         </div>

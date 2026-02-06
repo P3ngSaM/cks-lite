@@ -1,6 +1,5 @@
-import { memo } from 'react'
+import { memo, useState } from 'react'
 import { Zap, Terminal, Loader2, CheckCircle2, XCircle, Shield, ChevronDown, ChevronUp } from 'lucide-react'
-import { useState } from 'react'
 import type { ToolCallInfo } from '@/types/chat'
 
 export interface ToolCallCardProps {
@@ -43,7 +42,7 @@ const statusConfig = {
     iconClass: 'text-blue-400 animate-pulse',
     borderClass: 'border-blue-500/30',
     bgClass: 'bg-blue-500/5',
-    label: '等待批准...',
+    label: '等待审批...',
     labelClass: 'text-blue-400',
     dotClass: 'bg-blue-400',
     dotAnimate: true,
@@ -68,14 +67,11 @@ export const ToolCallCard = memo(({ toolCall }: ToolCallCardProps) => {
   const hasDetails = (toolCall.input && Object.keys(toolCall.input).length > 0) || toolCall.message
 
   return (
-    <div
-      className={`rounded-lg border ${config.borderClass} ${config.bgClass} overflow-hidden transition-all`}
-    >
+    <div className={`rounded-lg border ${config.borderClass} ${config.bgClass} overflow-hidden transition-all`}>
       <div
         className="flex items-center gap-2.5 px-3 py-2 cursor-pointer select-none"
         onClick={() => hasDetails && setExpanded(!expanded)}
       >
-        {/* Animated dot */}
         <span className="relative flex h-2 w-2 flex-shrink-0">
           {config.dotAnimate && (
             <span className={`absolute inline-flex h-full w-full rounded-full ${config.dotClass} opacity-75 animate-ping`} />
@@ -83,15 +79,12 @@ export const ToolCallCard = memo(({ toolCall }: ToolCallCardProps) => {
           <span className={`relative inline-flex h-2 w-2 rounded-full ${config.dotClass}`} />
         </span>
 
-        {/* Tool icon */}
         <ToolIcon className="h-3.5 w-3.5 text-neutral-400 flex-shrink-0" />
 
-        {/* Tool name */}
         <span className="text-xs font-medium text-neutral-200 font-mono">
           {toolCall.tool}
         </span>
 
-        {/* Status - always use short label */}
         <div className="flex items-center gap-1 ml-auto">
           <StatusIcon className={`h-3.5 w-3.5 ${config.iconClass}`} />
           <span className={`text-xs ${config.labelClass}`}>
@@ -105,7 +98,6 @@ export const ToolCallCard = memo(({ toolCall }: ToolCallCardProps) => {
         </div>
       </div>
 
-      {/* Expanded details */}
       {expanded && hasDetails && (
         <div className="px-3 pb-2 pt-0">
           {toolCall.input && Object.keys(toolCall.input).length > 0 && (

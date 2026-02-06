@@ -1,5 +1,6 @@
 use tauri::Manager;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 // Agent SDK base URL
@@ -17,9 +18,217 @@ const BLOCKED_COMMANDS: &[&str] = &[
     "diskpart",
 ];
 
-fn is_command_safe(command: &str) -> bool {
+// Allowlist-first policy for terminal execution
+const ALLOWED_PREFIXES: &[&str] = &[
+    "dir",
+    "ls",
+    "pwd",
+    "echo",
+    "type",
+    "cat",
+    "where",
+    "whoami",
+    "tasklist",
+    "python",
+    "py",
+    "node",
+    "npm",
+    "pnpm",
+    "pip",
+    "uv",
+    "git",
+];
+
+fn has_shell_chaining(command: &str) -> bool {
     let lower = command.to_lowercase();
-    BLOCKED_COMMANDS.iter().all(|b| !lower.contains(b))
+    lower.contains("&&")
+        || lower.contains("||")
+        || lower.contains(';')
+        || lower.contains('|')
+        || lower.contains('>')
+        || lower.contains('<')
+}
+
+fn split_command_tokens(command: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+
+    for ch in command.chars() {
+        if ch == '\'' && !in_double {
+            in_single = !in_single;
+            continue;
+        }
+        if ch == '"' && !in_single {
+            in_double = !in_double;
+            continue;
+        }
+
+        if ch.is_whitespace() && !in_single && !in_double {
+            if !current.is_empty() {
+                tokens.push(current.clone());
+                current.clear();
+            }
+            continue;
+        }
+
+        current.push(ch);
+    }
+
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    tokens
+}
+
+fn is_whitelisted_command(command: &str) -> bool {
+    let tokens = split_command_tokens(command);
+    let cmd = tokens
+        .get(0)
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    ALLOWED_PREFIXES.iter().any(|prefix| *prefix == cmd)
+}
+
+fn resolve_work_dir(cwd: Option<String>) -> String {
+    cwd.unwrap_or_else(|| {
+        std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .unwrap_or_else(|_| {
+                if cfg!(target_os = "windows") {
+                    "C:\\".to_string()
+                } else {
+                    "/".to_string()
+                }
+            })
+    })
+}
+
+fn first_script_token(cmd: &str, tokens: &[String]) -> Option<String> {
+    if cmd != "python" && cmd != "py" && cmd != "node" {
+        return None;
+    }
+
+    tokens
+        .iter()
+        .skip(1)
+        .find(|t| !t.starts_with('-'))
+        .map(|s| s.to_string())
+}
+
+fn is_path_within_base(script_path: &Path, base_dir: &Path) -> bool {
+    let script_abs = if script_path.is_absolute() {
+        script_path.to_path_buf()
+    } else {
+        base_dir.join(script_path)
+    };
+
+    let script_canon = script_abs.canonicalize();
+    let base_canon = base_dir.canonicalize();
+    if let (Ok(script_canon), Ok(base_canon)) = (script_canon, base_canon) {
+        return script_canon.starts_with(base_canon);
+    }
+    false
+}
+
+fn has_forbidden_args(cmd: &str, tokens: &[String], work_dir: &Path) -> bool {
+    // Guardrails for interpreter-style commands that could bypass policy.
+    if cmd == "python" || cmd == "py" {
+        if tokens
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case("-c") || t.eq_ignore_ascii_case("-m") || t.eq_ignore_ascii_case("-i"))
+        {
+            return true;
+        }
+    }
+    if cmd == "node" {
+        if tokens
+            .iter()
+            .any(|t| {
+                t.eq_ignore_ascii_case("-e")
+                    || t.eq_ignore_ascii_case("--eval")
+                    || t.eq_ignore_ascii_case("-p")
+                    || t.eq_ignore_ascii_case("--print")
+            })
+        {
+            return true;
+        }
+    }
+
+    // Restrict interpreter script execution to the requested working directory.
+    if let Some(script) = first_script_token(cmd, tokens) {
+        if script == "-" {
+            return true;
+        }
+        let script_path = PathBuf::from(script);
+        if !is_path_within_base(&script_path, work_dir) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn is_allowed_subcommand(cmd: &str, tokens: &[String]) -> bool {
+    // First token is command itself.
+    let sub = tokens
+        .get(1)
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    match cmd {
+        // read-oriented git subset for safety
+        "git" => matches!(
+            sub.as_str(),
+            "status" | "log" | "diff" | "show" | "branch" | "rev-parse" | "ls-files"
+        ),
+        // allow version/help checks by default for package tools
+        "npm" | "pnpm" | "pip" | "uv" => {
+            tokens.iter().any(|t| {
+                t.eq_ignore_ascii_case("--version")
+                    || t.eq_ignore_ascii_case("-v")
+                    || t.eq_ignore_ascii_case("help")
+                    || t.eq_ignore_ascii_case("--help")
+            })
+        }
+        _ => true,
+    }
+}
+
+fn command_policy_mode() -> String {
+    std::env::var("CKS_TERMINAL_POLICY")
+        .unwrap_or_else(|_| "whitelist".to_string())
+        .to_lowercase()
+}
+
+fn is_command_safe(command: &str, work_dir: &str) -> bool {
+    let lower = command.to_lowercase();
+    if BLOCKED_COMMANDS.iter().any(|b| lower.contains(b)) {
+        return false;
+    }
+
+    // whitelist mode is default; set CKS_TERMINAL_POLICY=legacy to disable this gate
+    if command_policy_mode() != "legacy" {
+        if has_shell_chaining(command) {
+            return false;
+        }
+        if !is_whitelisted_command(command) {
+            return false;
+        }
+        let tokens = split_command_tokens(command);
+        let cmd = tokens
+            .get(0)
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
+        let work_path = Path::new(work_dir);
+        if has_forbidden_args(&cmd, &tokens, work_path) {
+            return false;
+        }
+        return is_allowed_subcommand(&cmd, &tokens);
+    }
+
+    true
 }
 
 #[derive(Serialize, Deserialize)]
@@ -98,12 +307,18 @@ async fn execute_command(
     cwd: Option<String>,
     timeout_secs: Option<u64>,
 ) -> Result<CommandResult, String> {
-    if !is_command_safe(&command) {
+    let work_dir = resolve_work_dir(cwd);
+
+    if !is_command_safe(&command, &work_dir) {
+        let policy = command_policy_mode();
         return Ok(CommandResult {
             success: false,
             exit_code: None,
             stdout: String::new(),
-            stderr: "Command blocked: this command is not allowed for safety reasons.".to_string(),
+            stderr: format!(
+                "Command blocked by terminal policy (mode: {}). Use an allowed single command prefix or switch CKS_TERMINAL_POLICY=legacy for compatibility.",
+                policy
+            ),
             command,
             duration_ms: 0,
         });
@@ -112,9 +327,15 @@ async fn execute_command(
     let start = Instant::now();
     let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(30));
 
-    let mut cmd = tokio::process::Command::new("cmd");
-    // Use /S /C "..." to preserve inner quotes correctly
-    cmd.args(["/S", "/C", &command]);
+    let mut cmd = if cfg!(target_os = "windows") {
+        let mut c = tokio::process::Command::new("cmd");
+        c.args(["/S", "/C", &command]);
+        c
+    } else {
+        let mut c = tokio::process::Command::new("sh");
+        c.args(["-lc", &command]);
+        c
+    };
 
     // Force UTF-8 encoding for child processes via environment variables
     // (avoids chcp prefix that breaks cmd /C quote handling)
@@ -122,12 +343,6 @@ async fn execute_command(
     cmd.env("PYTHONUTF8", "1");
     cmd.env("LANG", "en_US.UTF-8");
 
-    // Default CWD to user home instead of Tauri app directory
-    let work_dir = cwd.unwrap_or_else(|| {
-        std::env::var("USERPROFILE")
-            .or_else(|_| std::env::var("HOME"))
-            .unwrap_or_else(|_| "C:\\".to_string())
-    });
     cmd.current_dir(&work_dir);
 
     cmd.stdout(std::process::Stdio::piped());
@@ -274,4 +489,60 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    #[test]
+    fn policy_blocks_obviously_dangerous_command() {
+        std::env::remove_var("CKS_TERMINAL_POLICY");
+        assert!(!is_command_safe("rm -rf /", "."));
+    }
+
+    #[test]
+    fn policy_allows_safe_git_read_commands() {
+        std::env::remove_var("CKS_TERMINAL_POLICY");
+        assert!(is_command_safe("git status", "."));
+        assert!(is_command_safe("git log", "."));
+    }
+
+    #[test]
+    fn policy_blocks_git_write_commands() {
+        std::env::remove_var("CKS_TERMINAL_POLICY");
+        assert!(!is_command_safe("git checkout main", "."));
+        assert!(!is_command_safe("git reset --hard", "."));
+    }
+
+    #[test]
+    fn policy_blocks_python_inline_execution() {
+        std::env::remove_var("CKS_TERMINAL_POLICY");
+        assert!(!is_command_safe("python -c \"print(1)\"", "."));
+        assert!(!is_command_safe("py -m pip list", "."));
+    }
+
+    #[test]
+    fn policy_allows_python_script_inside_workdir_but_blocks_outside() {
+        std::env::remove_var("CKS_TERMINAL_POLICY");
+
+        let base: PathBuf = std::env::temp_dir().join("cks_policy_test");
+        let inside = base.join("inside.py");
+        let outside = std::env::temp_dir().join("outside.py");
+
+        let _ = fs::create_dir_all(&base);
+        let _ = fs::write(&inside, "print('ok')");
+        let _ = fs::write(&outside, "print('no')");
+
+        assert!(is_command_safe(
+            &format!("python {}", inside.to_string_lossy()),
+            &base.to_string_lossy()
+        ));
+        assert!(!is_command_safe(
+            &format!("python {}", outside.to_string_lossy()),
+            &base.to_string_lossy()
+        ));
+    }
 }

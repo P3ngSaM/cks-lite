@@ -3,7 +3,7 @@ import { useEffect } from 'react'
 import { Sidebar } from './components/layout'
 import { AuthContainer } from './components/auth'
 import { Onboarding } from './components/onboarding'
-import { Workbench, Memory, Skills, Settings } from './pages'
+import { Workbench, Memory, Skills, Goals, Settings } from './pages'
 import {
   ErrorBoundary,
   ConnectedToastContainer,
@@ -24,6 +24,7 @@ function AppLayout() {
           <Route path="/workbench" element={<Workbench />} />
           <Route path="/memory" element={<Memory />} />
           <Route path="/skills" element={<Skills />} />
+          <Route path="/goals" element={<Goals />} />
           <Route path="/settings" element={<Settings />} />
         </Routes>
       </main>

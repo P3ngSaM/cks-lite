@@ -11,21 +11,18 @@ interface PermissionApprovalDialogProps {
 
 const riskConfig = {
   low: {
-    color: 'emerald',
     label: '低风险',
     borderClass: 'border-emerald-500/40',
     bgClass: 'bg-emerald-500/10',
     badgeClass: 'bg-emerald-500/20 text-emerald-400',
   },
   medium: {
-    color: 'amber',
     label: '中风险',
     borderClass: 'border-amber-500/40',
     bgClass: 'bg-amber-500/10',
     badgeClass: 'bg-amber-500/20 text-amber-400',
   },
   high: {
-    color: 'red',
     label: '高风险',
     borderClass: 'border-red-500/40',
     bgClass: 'bg-red-500/10',
@@ -55,7 +52,6 @@ function getToolDetail(tool: string, input: Record<string, any>): string {
     case 'read_file':
     case 'write_file':
     case 'get_file_info':
-      return input.path || ''
     case 'list_directory':
       return input.path || ''
     default:
@@ -71,36 +67,25 @@ export const PermissionApprovalDialog = memo(
 
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-        <div
-          className={`w-full max-w-md mx-4 rounded-xl border ${risk.borderClass} bg-neutral-900 shadow-2xl`}
-        >
-          {/* Header */}
+        <div className={`w-full max-w-md mx-4 rounded-xl border ${risk.borderClass} bg-neutral-900 shadow-2xl`}>
           <div className="flex items-center gap-3 px-5 pt-5 pb-3">
             <div className={`p-2 rounded-lg ${risk.bgClass}`}>
               <ToolIcon className="h-5 w-5 text-neutral-200" />
             </div>
             <div className="flex-1">
               <div className="flex items-center gap-2">
-                <h3 className="text-sm font-semibold text-white">
-                  AI 请求桌面权限
-                </h3>
-                <span
-                  className={`text-xs px-2 py-0.5 rounded-full font-medium ${risk.badgeClass}`}
-                >
+                <h3 className="text-sm font-semibold text-white">AI 请求桌面权限</h3>
+                <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${risk.badgeClass}`}>
                   {risk.label}
                 </span>
               </div>
-              <p className="text-xs text-neutral-400 mt-0.5">
-                {request.tool}
-              </p>
+              <p className="text-xs text-neutral-400 mt-0.5">{request.tool}</p>
             </div>
           </div>
 
-          {/* Description */}
           <div className="px-5 py-3">
             <p className="text-sm text-neutral-300">{request.description}</p>
 
-            {/* Detail code block */}
             {detail && (
               <div className="mt-3 rounded-lg bg-black/50 border border-neutral-800 px-3 py-2.5 overflow-x-auto">
                 <code className="text-xs text-neutral-300 font-mono break-all whitespace-pre-wrap">
@@ -109,18 +94,16 @@ export const PermissionApprovalDialog = memo(
               </div>
             )}
 
-            {/* High risk warning */}
             {request.risk_level === 'high' && (
               <div className="mt-3 flex items-start gap-2 rounded-lg bg-red-500/10 border border-red-500/20 px-3 py-2.5">
                 <AlertTriangle className="h-4 w-4 text-red-400 flex-shrink-0 mt-0.5" />
                 <p className="text-xs text-red-400">
-                  此操作可能修改或删除文件，请仔细确认后再批准。
+                  此操作可能修改或删除文件，请确认后再批准。
                 </p>
               </div>
             )}
           </div>
 
-          {/* Actions */}
           <div className="flex items-center gap-2 px-5 pb-5 pt-2">
             <button
               onClick={onDeny}
@@ -137,7 +120,7 @@ export const PermissionApprovalDialog = memo(
             <button
               onClick={onApproveAll}
               className="flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 hover:bg-emerald-500/20 transition-colors"
-              title="本次对话后续操作将自动批准"
+              title="本次对话后续请求自动批准"
             >
               <CheckCheck className="h-3.5 w-3.5" />
               全部批准

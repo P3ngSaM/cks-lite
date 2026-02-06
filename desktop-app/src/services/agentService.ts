@@ -7,7 +7,14 @@ import type {
   SkillsResult,
   SkillDetailResult,
   SkillInstallResult,
+  SkillReadinessResult,
+  SkillSmokeTestResult,
+  AuditRecordsResult,
   HealthStatus,
+  GoalsTreeResult,
+  GoalCreateResult,
+  GoalActionResult,
+  GoalTaskListResult,
 } from '../types/agent'
 import { withRetry, type RetryConfig } from '../utils/errorHandler'
 
@@ -340,6 +347,339 @@ export class AgentService {
   }
 
   /**
+   * Get skills readiness diagnostics
+   */
+  static async listSkillsReadiness(skillName?: string): Promise<SkillReadinessResult | null> {
+    return withRetry(
+      async () => {
+        const params = new URLSearchParams()
+        if (skillName) {
+          params.append('skill_name', skillName)
+        }
+        const suffix = params.toString() ? `?${params.toString()}` : ''
+        const response = await this.fetchWithTimeout(`${this.baseURL}/skills/readiness${suffix}`)
+
+        if (!response.ok) {
+          throw new Error(`List skills readiness failed: ${response.statusText}`)
+        }
+
+        return response.json()
+      },
+      this.readRetryConfig,
+      'List Skills Readiness'
+    )
+  }
+
+  /**
+   * Run skill smoke test
+   */
+  static async smokeTestSkill(skillName?: string): Promise<SkillSmokeTestResult | null> {
+    return withRetry(
+      async () => {
+        const params = new URLSearchParams()
+        if (skillName) {
+          params.append('skill_name', skillName)
+        }
+        const suffix = params.toString() ? `?${params.toString()}` : ''
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/skills/smoke-test${suffix}`,
+          { method: 'POST' },
+          60000
+        )
+
+        if (!response.ok) {
+          throw new Error(`Smoke test skill failed: ${response.statusText}`)
+        }
+
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Skill Smoke Test'
+    )
+  }
+
+  /**
+   * Get tool execution audit logs
+   */
+  static async getAuditExecutions(
+    sessionId?: string,
+    limit: number = 100,
+    toolName?: string,
+    fromTime?: string,
+    toTime?: string
+  ): Promise<AuditRecordsResult | null> {
+    return withRetry(
+      async () => {
+        const params = new URLSearchParams()
+        if (sessionId) {
+          params.append('session_id', sessionId)
+        }
+        if (toolName) {
+          params.append('tool_name', toolName)
+        }
+        if (fromTime) {
+          params.append('from_time', fromTime)
+        }
+        if (toTime) {
+          params.append('to_time', toTime)
+        }
+        params.append('limit', Math.max(1, Math.min(limit, 1000)).toString())
+
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/audit/executions?${params.toString()}`
+        )
+
+        if (!response.ok) {
+          throw new Error(`Get audit executions failed: ${response.statusText}`)
+        }
+
+        return response.json()
+      },
+      this.readRetryConfig,
+      'Get Audit Executions'
+    )
+  }
+
+  /**
+   * Get tool error audit logs
+   */
+  static async getAuditErrors(
+    sessionId?: string,
+    limit: number = 100,
+    toolName?: string,
+    fromTime?: string,
+    toTime?: string
+  ): Promise<AuditRecordsResult | null> {
+    return withRetry(
+      async () => {
+        const params = new URLSearchParams()
+        if (sessionId) {
+          params.append('session_id', sessionId)
+        }
+        if (toolName) {
+          params.append('tool_name', toolName)
+        }
+        if (fromTime) {
+          params.append('from_time', fromTime)
+        }
+        if (toTime) {
+          params.append('to_time', toTime)
+        }
+        params.append('limit', Math.max(1, Math.min(limit, 1000)).toString())
+
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/audit/errors?${params.toString()}`
+        )
+
+        if (!response.ok) {
+          throw new Error(`Get audit errors failed: ${response.statusText}`)
+        }
+
+        return response.json()
+      },
+      this.readRetryConfig,
+      'Get Audit Errors'
+    )
+  }
+
+  /**
+   * Get KPI/OKR/Project/Task hierarchy
+   */
+  static async getGoalsTree(): Promise<GoalsTreeResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(`${this.baseURL}/goals/tree`)
+
+        if (!response.ok) {
+          throw new Error(`Get goals tree failed: ${response.statusText}`)
+        }
+
+        return response.json()
+      },
+      this.readRetryConfig,
+      'Get Goals Tree'
+    )
+  }
+
+  /**
+   * Create KPI
+   */
+  static async createKPI(
+    title: string,
+    description: string = ''
+  ): Promise<GoalCreateResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(`${this.baseURL}/goals/kpi`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ title, description }),
+        })
+
+        if (!response.ok) {
+          throw new Error(`Create KPI failed: ${response.statusText}`)
+        }
+
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Create KPI'
+    )
+  }
+
+  /**
+   * Create OKR
+   */
+  static async createOKR(
+    kpiId: number,
+    title: string,
+    description: string = ''
+  ): Promise<GoalCreateResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(`${this.baseURL}/goals/okr`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ kpi_id: kpiId, title, description }),
+        })
+
+        if (!response.ok) {
+          throw new Error(`Create OKR failed: ${response.statusText}`)
+        }
+
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Create OKR'
+    )
+  }
+
+  /**
+   * Create project
+   */
+  static async createGoalProject(
+    okrId: number,
+    title: string,
+    description: string = ''
+  ): Promise<GoalCreateResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(`${this.baseURL}/goals/project`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ okr_id: okrId, title, description }),
+        })
+
+        if (!response.ok) {
+          throw new Error(`Create project failed: ${response.statusText}`)
+        }
+
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Create Project'
+    )
+  }
+
+  /**
+   * Create task
+   */
+  static async createGoalTask(
+    projectId: number,
+    title: string,
+    description: string = '',
+    assignee: string = ''
+  ): Promise<GoalCreateResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(`${this.baseURL}/goals/task`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            project_id: projectId,
+            title,
+            description,
+            assignee,
+          }),
+        })
+
+        if (!response.ok) {
+          throw new Error(`Create task failed: ${response.statusText}`)
+        }
+
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Create Task'
+    )
+  }
+
+  /**
+   * Mark a task completed
+   */
+  static async completeGoalTask(taskId: number): Promise<GoalActionResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/goals/task/${taskId}/complete`,
+          { method: 'POST' }
+        )
+
+        if (!response.ok) {
+          throw new Error(`Complete task failed: ${response.statusText}`)
+        }
+
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Complete Task'
+    )
+  }
+
+  /**
+   * List tasks with filters
+   */
+  static async listGoalTasks(
+    options: {
+      assignee?: string
+      status?: string
+      fromTime?: string
+      toTime?: string
+      limit?: number
+    } = {}
+  ): Promise<GoalTaskListResult | null> {
+    return withRetry(
+      async () => {
+        const params = new URLSearchParams()
+        if (options.assignee) params.append('assignee', options.assignee)
+        if (options.status) params.append('status', options.status)
+        if (options.fromTime) params.append('from_time', options.fromTime)
+        if (options.toTime) params.append('to_time', options.toTime)
+        params.append('limit', String(Math.max(1, Math.min(options.limit ?? 200, 2000))))
+
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/goals/tasks?${params.toString()}`
+        )
+
+        if (!response.ok) {
+          throw new Error(`List goal tasks failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.readRetryConfig,
+      'List Goal Tasks'
+    )
+  }
+
+  /**
    * Get skill details (with retry)
    */
   static async getSkill(skillName: string): Promise<SkillDetailResult | null> {
@@ -400,19 +740,18 @@ export class AgentService {
   } | null> {
     return withRetry(
       async () => {
-        const params = new URLSearchParams({
-          skill_name: skillName,
-          script_name: scriptName,
-        })
-
         const response = await this.fetchWithTimeout(
-          `${this.baseURL}/skills/execute?${params}`,
+          `${this.baseURL}/skills/execute`,
           {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
             },
-            body: JSON.stringify({ args }),
+            body: JSON.stringify({
+              skill_name: skillName,
+              script_name: scriptName,
+              args
+            }),
           },
           60000 // 60 second timeout for script execution
         )

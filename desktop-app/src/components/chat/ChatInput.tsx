@@ -13,7 +13,7 @@ export const ChatInput = ({
   onSend,
   onStop,
   disabled,
-  placeholder = '输入消息... (Shift + Enter 换行)'
+  placeholder = '输入消息...（Shift + Enter 换行）'
 }: ChatInputProps) => {
   const [message, setMessage] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -26,14 +26,12 @@ export const ChatInput = ({
     onSend(trimmedMessage)
     setMessage('')
 
-    // Reset textarea height
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
     }
   }
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    // Submit on Enter (without Shift)
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       handleSubmit()
@@ -42,8 +40,6 @@ export const ChatInput = ({
 
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setMessage(e.target.value)
-
-    // Auto-resize textarea
     const textarea = e.target
     textarea.style.height = 'auto'
     textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`
@@ -56,7 +52,7 @@ export const ChatInput = ({
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files
     if (files && files.length > 0) {
-      // TODO: Handle file upload
+      // TODO: 文件上传逻辑
       console.log('Selected files:', files)
     }
   }
@@ -64,11 +60,10 @@ export const ChatInput = ({
   return (
     <div className="border-t border-neutral-800 bg-black p-6">
       <div className="max-w-4xl mx-auto">
-        {/* Execution progress bar */}
         {disabled && (
           <div className="flex items-center gap-2 mb-3 px-1">
             <Loader2 className="h-3.5 w-3.5 text-blue-400 animate-spin flex-shrink-0" />
-            <span className="text-xs text-blue-400">AI 正在执行中...</span>
+            <span className="text-xs text-blue-400">AI 正在处理中...</span>
             <div className="flex-1 h-0.5 bg-neutral-800 rounded-full overflow-hidden">
               <div className="h-full bg-blue-500/60 rounded-full animate-pulse" style={{ width: '60%' }} />
             </div>
@@ -84,7 +79,6 @@ export const ChatInput = ({
           </div>
         )}
 
-        {/* Single textarea container with buttons inside */}
         <div className="relative">
           <textarea
             ref={textareaRef}
@@ -92,7 +86,7 @@ export const ChatInput = ({
             onChange={handleInput}
             onKeyDown={handleKeyDown}
             disabled={disabled}
-            placeholder={disabled ? 'AI 执行中，请等待完成...' : placeholder}
+            placeholder={disabled ? 'AI 正在执行中，请稍候...' : placeholder}
             rows={1}
             className={cn(
               'w-full px-4 py-3 pr-24 pb-12 rounded-lg resize-none transition-colors',
@@ -104,9 +98,7 @@ export const ChatInput = ({
             )}
           />
 
-          {/* Bottom right buttons */}
           <div className="absolute bottom-3 right-3 flex items-center gap-2">
-            {/* Upload file button */}
             <button
               type="button"
               onClick={handleFileClick}
@@ -121,7 +113,6 @@ export const ChatInput = ({
               <Paperclip className="h-5 w-5" />
             </button>
 
-            {/* Send button */}
             <button
               onClick={handleSubmit}
               disabled={disabled || !message.trim()}
@@ -138,7 +129,6 @@ export const ChatInput = ({
             </button>
           </div>
 
-          {/* Hidden file input */}
           <input
             ref={fileInputRef}
             type="file"
@@ -149,9 +139,8 @@ export const ChatInput = ({
           />
         </div>
 
-        {/* Helper Text */}
         <p className="text-xs text-neutral-600 mt-3 text-center">
-          Enter 发送 • Shift + Enter 换行
+          Enter 发送 · Shift + Enter 换行
         </p>
       </div>
     </div>
