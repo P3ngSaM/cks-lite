@@ -1,0 +1,82 @@
+# Node modules
+node_modules/
+desktop-app/node_modules/
+mobile-app/node_modules/
+
+# Build outputs
+desktop-app/dist/
+desktop-app/src-tauri/target/
+cloud-service/__pycache__/
+agent-sdk/__pycache__/
+agent-sdk/build/
+*.pyc
+*.pyo
+
+# Environment files
+.env
+.env.local
+desktop-app/.env
+agent-sdk/.env
+cloud-service/.env
+
+# Python virtual environment
+venv/
+env/
+agent-sdk/venv/
+cloud-service/venv/
+
+# SQLite databases
+*.db
+*.sqlite
+*.sqlite3
+
+# FAISS indexes
+*.faiss
+*.index
+
+# Logs
+*.log
+logs/
+agent-sdk/logs/
+cloud-service/logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# User data
+data/
+agent-sdk/data/
+uploads/
+
+# Test coverage
+coverage/
+.coverage
+htmlcov/
+
+# Package files
+*.egg-info/
+dist/
+build/
+
+# Tauri
+desktop-app/src-tauri/target/
+desktop-app/src-tauri/WixTools/
+
+# Lock files (optional - remove if you want to commit them)
+# package-lock.json
+# yarn.lock
+# poetry.lock

@@ -1,0 +1,25 @@
+[package]
+name = "cks-lite"
+version = "0.1.0"
+description = "CKS Lite - Lightweight AI Workbench"
+authors = ["CKS Team"]
+license = ""
+repository = ""
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+tauri = { version = "2.2", features = ["protocol-asset"] }
+tauri-plugin-shell = "2.0"
+tauri-plugin-fs = "2.0"
+tauri-plugin-dialog = "2.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+tokio = { version = "1", features = ["full"] }
+
+[features]
+# This feature is used for production builds or when a dev server is not specified, DO NOT REMOVE!!
+custom-protocol = ["tauri/custom-protocol"]
