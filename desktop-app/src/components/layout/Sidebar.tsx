@@ -1,5 +1,5 @@
 import { Link, useLocation } from 'react-router-dom'
-import { MessageSquare, Brain, Zap, Target, Settings } from 'lucide-react'
+import { MessageSquare, Brain, Zap, Target, Settings, LayoutDashboard, Bot } from 'lucide-react'
 import { cn } from '@/utils/cn'
 
 interface NavItem {
@@ -28,6 +28,16 @@ const navItems: NavItem[] = [
     name: '目标',
     path: '/goals',
     icon: <Target className="h-5 w-5" />
+  },
+  {
+    name: '看板',
+    path: '/board',
+    icon: <LayoutDashboard className="h-5 w-5" />
+  },
+  {
+    name: '自动化',
+    path: '/automation',
+    icon: <Bot className="h-5 w-5" />
   }
 ]
 

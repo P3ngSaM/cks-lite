@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+﻿import { useEffect, useState } from 'react'
 import { Search, X } from 'lucide-react'
 import { cn } from '@/utils/cn'
 
@@ -11,11 +11,10 @@ export interface SearchBarProps {
 export const SearchBar = ({
   onSearch,
   placeholder = '搜索记忆...',
-  debounceMs = 500
+  debounceMs = 500,
 }: SearchBarProps) => {
   const [query, setQuery] = useState('')
 
-  // Debounced search
   useEffect(() => {
     const timer = setTimeout(() => {
       onSearch(query)

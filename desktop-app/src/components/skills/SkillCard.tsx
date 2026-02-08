@@ -1,5 +1,5 @@
 import { memo, useState } from 'react'
-import { Zap, ChevronDown, ChevronUp, Tag, FileText, Play, Globe, Trash2, FlaskConical } from 'lucide-react'
+import { Zap, ChevronDown, ChevronUp, Tag, FileText, Play, Globe, Trash2, FlaskConical, Pencil } from 'lucide-react'
 import { cn } from '@/utils/cn'
 import type { Skill, SkillReadiness } from '@/types/agent'
 
@@ -9,9 +9,12 @@ export interface SkillCardProps {
   onViewContext?: (skillName: string) => void
   onUninstall?: (skillName: string) => void
   onRunTest?: (skillName: string) => void
+  onRunInWorkbench?: (skillName: string) => void
+  onEditAlias?: (skillName: string) => void
+  onRunExample?: (skillName: string) => void
 }
 
-export const SkillCard = memo(({ skill, readiness, onViewContext, onUninstall, onRunTest }: SkillCardProps) => {
+export const SkillCard = memo(({ skill, readiness, onViewContext, onUninstall, onRunTest, onRunInWorkbench, onEditAlias, onRunExample }: SkillCardProps) => {
   const [isExpanded, setIsExpanded] = useState(false)
 
   const categoryLabelMap: Record<string, string> = {
@@ -46,6 +49,15 @@ export const SkillCard = memo(({ skill, readiness, onViewContext, onUninstall, o
     runtime_error: { label: '异常', className: 'bg-red-500/20 text-red-400' }
   } as const
   const readinessBadge = readiness ? readinessConfig[readiness.status] : null
+  const sourceConfig: Record<string, { label: string; className: string }> = {
+    'pre-installed': { label: '内置', className: 'bg-slate-500/20 text-slate-300' },
+    'user-installed': { label: '社区安装', className: 'bg-purple-500/20 text-purple-300' },
+    installed: { label: '本地仓库', className: 'bg-indigo-500/20 text-indigo-300' },
+    plugin: { label: '插件来源', className: 'bg-cyan-500/20 text-cyan-300' },
+    global: { label: '全局来源', className: 'bg-emerald-500/20 text-emerald-300' },
+    project: { label: '项目来源', className: 'bg-orange-500/20 text-orange-300' },
+  }
+  const sourceBadge = sourceConfig[(skill.source || '').toLowerCase()] || { label: skill.source || '未知来源', className: 'bg-neutral-700 text-neutral-300' }
 
   return (
     <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-4 hover:border-neutral-700 transition-colors">
@@ -100,12 +112,10 @@ export const SkillCard = memo(({ skill, readiness, onViewContext, onUninstall, o
                 应用
               </span>
             )}
-            {skill.source === 'user-installed' && (
-              <span className="px-2 py-1 rounded-full text-xs font-medium bg-purple-500/20 text-purple-400 flex items-center gap-1">
-                <Globe className="h-3 w-3" />
-                社区
-              </span>
-            )}
+            <span className={cn('px-2 py-1 rounded-full text-xs font-medium flex items-center gap-1', sourceBadge.className)}>
+              <Globe className="h-3 w-3" />
+              {sourceBadge.label}
+            </span>
             {readinessBadge && (
               <span className={cn('px-2 py-1 rounded-full text-xs font-medium', readinessBadge.className)}>
                 {readinessBadge.label}
@@ -171,6 +181,36 @@ export const SkillCard = memo(({ skill, readiness, onViewContext, onUninstall, o
             </button>
           )}
 
+          {onRunInWorkbench && skill.has_skill && (
+            <button
+              onClick={() => onRunInWorkbench(skill.name)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-emerald-400 hover:text-emerald-300 hover:bg-emerald-500/10 transition-colors"
+            >
+              <Play className="h-3.5 w-3.5" />
+              工作台试运行
+            </button>
+          )}
+
+          {onEditAlias && (
+            <button
+              onClick={() => onEditAlias(skill.name)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-neutral-300 hover:text-white hover:bg-neutral-800 transition-colors"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+              中文别名
+            </button>
+          )}
+
+          {onRunExample && skill.has_skill && (
+            <button
+              onClick={() => onRunExample(skill.name)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-indigo-300 hover:text-indigo-200 hover:bg-indigo-500/10 transition-colors"
+            >
+              <Play className="h-3.5 w-3.5" />
+              示例任务
+            </button>
+          )}
+
           {skill.source === 'user-installed' && onUninstall && (
             <button
               onClick={() => onUninstall(skill.name)}
@@ -219,6 +259,12 @@ export const SkillCard = memo(({ skill, readiness, onViewContext, onUninstall, o
                   <span className="text-neutral-300 font-mono text-xs truncate">{skill.source_url}</span>
                 </div>
               )}
+              <div className="flex items-center gap-2">
+                <span className="text-neutral-500 w-20">来源类型:</span>
+                <span className={cn('px-1.5 py-0.5 rounded text-xs', sourceBadge.className)}>
+                  {sourceBadge.label}
+                </span>
+              </div>
               {readiness && (
                 <div className="flex items-start gap-2">
                   <span className="text-neutral-500 w-20">状态:</span>

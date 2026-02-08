@@ -7,8 +7,9 @@ import os
 import json
 import importlib
 import sys
+import time
 from pathlib import Path
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 import logging
 import re
 import threading
@@ -160,11 +161,16 @@ class SkillsLoader:
         self.skills_dir = skills_dir or Path(__file__).parent.parent / "skills"
         self.additional_dirs = additional_dirs or []
         self.skills: List[Skill] = []
+        self.snapshot_version = int(time.time() * 1000)
+        self._watch_enabled = os.getenv("SKILLS_WATCH_ENABLED", "1") != "0"
+        self._scan_lock = threading.RLock()
+        self._last_signature: Tuple = ()
 
         # 所有已注册的工具 {tool_name: SkillTool}
         self.registered_tools: Dict[str, SkillTool] = {}
 
         self._load_skills()
+        self._last_signature = self._compute_signature()
 
         tool_count = len(self.registered_tools)
         logger.info(f"加载 Skills 完成: {len(self.skills)} 个, 工具: {tool_count} 个")
@@ -298,7 +304,56 @@ class SkillsLoader:
         self.skills.clear()
         self.registered_tools.clear()
         self._load_skills()
+        self.snapshot_version = int(time.time() * 1000)
+        self._last_signature = self._compute_signature()
         logger.info(f"Skills 重新加载: {len(self.skills)} 个, 工具: {len(self.registered_tools)} 个")
+
+    def _compute_signature(self) -> Tuple:
+        """
+        计算技能目录签名（轮询式 watcher 使用）。
+        仅跟踪关键文件，避免每次都深度扫描整个目录树。
+        """
+        entries: List[Tuple[str, int]] = []
+        all_dirs = [self.skills_dir] + self.additional_dirs
+        for scan_dir in all_dirs:
+            if not scan_dir.exists() or not scan_dir.is_dir():
+                continue
+            for skill_dir in sorted(scan_dir.iterdir(), key=lambda p: p.name):
+                if not skill_dir.is_dir() or skill_dir.name.startswith("."):
+                    continue
+                if skill_dir.name in ("shared", "__pycache__", "node_modules"):
+                    continue
+                for rel_name in ("SKILL.md", "template.json", "app/main.py"):
+                    target = skill_dir / rel_name
+                    if target.exists():
+                        try:
+                            entries.append((str(target), int(target.stat().st_mtime_ns)))
+                        except OSError:
+                            continue
+        return tuple(entries)
+
+    def refresh_if_changed(self, force: bool = False) -> bool:
+        """
+        轮询刷新入口。
+        返回 True 表示检测到变化并已重新加载。
+        """
+        if not force and not self._watch_enabled:
+            return False
+
+        with self._scan_lock:
+            current = self._compute_signature()
+            if not force and current == self._last_signature:
+                return False
+            self.reload()
+            return True
+
+    def get_snapshot_meta(self) -> Dict[str, Any]:
+        """返回当前 skills snapshot 元信息。"""
+        return {
+            "version": self.snapshot_version,
+            "skills_count": len(self.skills),
+            "tools_count": len(self.registered_tools),
+        }
 
     def annotate_sources(self, installed_manifest: dict):
         """标注技能来源（预装 vs 用户安装）"""

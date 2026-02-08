@@ -375,3 +375,762 @@
   - `python -m unittest agent-sdk/tests/test_goal_manager.py agent-sdk/tests/test_repetition_guard.py` passed.
   - `npm run build` (desktop-app) passed.
   - TestClient 自动回写验证脚本：`AUTO_WRITEBACK_PASS`。
+## Progress Update 2026-02-07 01:35 (目标页任务详情抽屉 + 一键回放)
+- Goals 页面新增“任务详情抽屉”：
+  - 在任务筛选列表中新增“详情/回放”按钮，点击打开右侧抽屉。
+  - 抽屉展示任务基础信息（负责人/状态/进度/层级）与日志区块。
+- 完成“一键回放该任务相关审计日志”链路：
+  - 审计日志新增 `goal_task_id` 字段写入（execution/error）。
+  - `/audit/executions` 与 `/audit/errors` 新增 `goal_task_id` 过滤参数。
+  - 前端回放按钮按 `goal_task_id + from/to` 联动查询并展示执行/错误日志。
+- 兼容性：
+  - 保持 Skills 页面原有审计筛选调用兼容（参数顺序未破坏）。
+- Validation:
+  - `python -m py_compile agent-sdk/main.py agent-sdk/core/agent.py agent-sdk/core/goal_manager.py agent-sdk/core/audit_logger.py agent-sdk/models/request.py` passed.
+  - `python -m unittest agent-sdk/tests/test_goal_manager.py agent-sdk/tests/test_repetition_guard.py` passed.
+  - `npm run build` (desktop-app) passed.
+  - 审计过滤验证：`AUDIT_GOAL_FILTER_OK`.
+## Progress Update 2026-02-07 01:45 (继续开发：按会话持久绑定任务)
+- 将“工作台绑定任务”从 `localStorage` 单键模式升级为“按会话持久绑定”：
+  - `chatStore` 新增 `sessionGoalTaskMap`；
+  - 新增操作：`setSessionGoalTask / clearSessionGoalTask / getSessionGoalTask`；
+  - 删除会话时同步清理绑定关系。
+- Goals 页面绑定按钮改为写入当前会话映射（而非全局键）。
+- Workbench 读取当前 `currentSessionId` 对应绑定任务并自动透传 `goal_task_id`，多会话切换时自动切换绑定任务。
+- Validation:
+  - `npm run build` (desktop-app) passed.
+## Progress Update 2026-02-07 10:25 (评审修复 + 新功能继续)
+- 评审后先修复高风险回写逻辑：
+  - 删除 `/chat` 非流式“只要有 tool_calls 就完成任务”的误判逻辑；
+  - `/chat/stream` 回写条件升级为：存在成功工具调用，且不存在失败工具调用，且流中无 error 事件。
+- 新功能继续开发（任务详情抽屉增强）：
+  - 新增“导出该任务审计 JSON”按钮；
+  - 新增“关联会话 ID”聚合展示；
+  - 执行/错误日志支持查看输入输出详情（折叠展开）。
+- Validation:
+  - `python -m py_compile agent-sdk/main.py agent-sdk/core/agent.py agent-sdk/core/audit_logger.py` passed.
+  - `python -m unittest agent-sdk/tests/test_goal_manager.py agent-sdk/tests/test_repetition_guard.py` passed.
+  - `npm run build` (desktop-app) passed.
+  - 回写防误判验证：`COMPLETION_GUARD_OK`.
+## Progress Update 2026-02-07 10:40 (主链路优先：桌面打包流水线)
+- 根据“避免过度打磨单模块”的反馈，优先推进全局主链路能力：跨平台打包。
+- 新增 GitHub Actions 桌面打包流水线：
+  - `.github/workflows/desktop-bundle.yml`
+  - 支持 `windows-latest` / `macos-latest` 双平台产物上传（exe / dmg 相关 bundle）。
+- 对齐 Tauri 构建命令，降低环境依赖耦合：
+  - `desktop-app/src-tauri/tauri.conf.json` 中 `beforeDevCommand`/`beforeBuildCommand` 统一为 `npm run ...`。
+- 新增文档：
+  - `docs/desktop-release-pipeline.md`（本地打包命令 + CI 触发与产物路径）。
+- Validation:
+  - `npm run build` (desktop-app) passed.
+## Progress Update 2026-02-07 11:00 (继续开发：桌面端后端自启动 + 打包资源)
+- 增加桌面端 Agent SDK 自启动能力（主链路优先）：
+  - Tauri 新增 `start_agent_service` 命令；
+  - 启动时自动探测并尝试拉起本地 Agent SDK（优先检查 health，避免重复启动）；
+  - 支持从环境变量、资源目录、常见开发目录自动定位 `agent-sdk/main.py`。
+- 桌面打包资源补齐：
+  - `tauri.conf.json` 的 bundle resources 新增 `../../agent-sdk`，确保打包产物内包含后端代码资源。
+- 前端接入：
+  - App 启动时（Tauri 环境）自动调用 `startAgentService`，提高开箱即用性。
+- Validation:
+  - `cargo test --lib` (desktop-app/src-tauri) passed.
+  - `npm run build` (desktop-app) passed.
+  - `npm run tauri:build -- --bundles msi` 在当前环境超时（>240s），已确认命令可执行，后续在 CI 完整验证。
+## Progress Update 2026-02-07 11:15 (继续开发：启动前自检能力)
+- 新增 Agent SDK 启动前自检命令：
+  - Tauri 命令 `get_agent_startup_diagnostics`，返回：
+    - 是否已运行
+    - 可用 agent-sdk 路径
+    - Python 启动器可用性
+    - 启动可行性与修复建议 hints
+- 强化 `start_agent_service`：
+  - 启动前先检查 python/py 可用，避免静默失败。
+- 前端接入：
+  - 启动失败时自动读取 diagnostics 并输出结构化日志（便于定位安装环境问题）。
+- Validation:
+  - `cargo test --lib` (desktop-app/src-tauri) passed.
+  - `npm run build` (desktop-app) passed.
+## Progress Update 2026-02-07 11:30 (继续开发：首启健康卡)
+- 在设置页新增“Agent 启动健康”卡片（Tauri 环境可见）：
+  - 展示：运行状态、可启动性、Python 启动器、SDK 路径；
+  - 支持：刷新诊断、一键启动后端；
+  - 启动失败时展示 hints，便于非技术用户定位问题。
+- 对接命令：
+  - `get_agent_startup_diagnostics`
+  - `start_agent_service`
+- Validation:
+  - `npm run build` (desktop-app) passed.
+  - `cargo test --lib` (desktop-app/src-tauri) passed.
+## Progress Update 2026-02-07 11:45 (前端可视化优先：设置页重构)
+- 根据“先看前端效果”的需求，重构 Settings 页面为可展示版本（中文统一 + 功能可点）：
+  - 账号信息、助手名称/头像、密码区、退出登录；
+  - 桌面环境下保留 Agent 启动健康卡（刷新诊断/一键启动）；
+  - 修复此前页面文案乱码与可读性问题。
+- Validation:
+  - `npm run build` (desktop-app) passed.
+## Progress Update 2026-02-07 12:00 (前端可视化继续：工作台重构)
+- Workbench 页面完成可展示版本重构（中文文案 + 绑定状态 + 审批交互保持可用）：
+  - 修复此前页面文案乱码；
+  - 保留桌面工具审批流、搜索结果流、任务绑定回写参数透传；
+  - 头部状态对“已绑定任务”展示更清晰。
+- Validation:
+  - `npm run build` (desktop-app) passed.
+## Progress Update 2026-02-07 12:25 (Memory System Optimization Round 1)
+- Completed memory quality upgrade focused on practical retrieval effect (not over-polishing UI):
+  - `save_memory` now performs normalized duplicate detection (same user + type + normalized content).
+  - Duplicate hit no longer creates a new row/index entry; it merges metadata and refreshes importance/access timestamps.
+  - New memories now write `importance` explicitly (estimated by memory type + keyword heuristics + metadata override).
+- Retrieval quality improved:
+  - Added unified reranking with combined score = retrieval score + importance boost + recency boost + light access-count boost.
+  - Applied reranking to both hybrid retrieval path and legacy fallback path.
+  - Search outputs now carry `importance`/`access_count` consistently so ranking has stable signals.
+- Added regression tests:
+  - `agent-sdk/tests/test_memory_manager.py`
+  - verifies duplicate deduplication and ranking preference for high-importance memories.
+- Validation:
+  - `python -m py_compile agent-sdk/core/memory.py agent-sdk/core/agent.py agent-sdk/core/audit_logger.py agent-sdk/main.py` passed.
+  - `python -m unittest agent-sdk/tests/test_memory_manager.py agent-sdk/tests/test_goal_manager.py agent-sdk/tests/test_repetition_guard.py` passed.
+## Progress Update 2026-02-07 12:40 (Memory Optimization Round 2: Near-Duplicate)
+- Upgraded memory dedup from exact-only to near-duplicate aware:
+  - `agent-sdk/core/memory.py`
+  - added `_text_similarity(...)` using normalized text + `SequenceMatcher`.
+  - `_find_duplicate_memory(...)` now supports configurable near-duplicate threshold via env:
+    - `MEMORY_DUPLICATE_THRESHOLD` (default `0.96`).
+  - invalid env values auto-fallback to safe default.
+- Added test coverage for near-duplicate behavior:
+  - `agent-sdk/tests/test_memory_manager.py`
+  - new test: same semantic sentence with punctuation/date format variation dedups under threshold.
+- Validation:
+  - `python -m py_compile agent-sdk/core/memory.py agent-sdk/core/agent.py agent-sdk/core/audit_logger.py agent-sdk/main.py` passed.
+  - `python -m unittest agent-sdk/tests/test_memory_manager.py agent-sdk/tests/test_goal_manager.py agent-sdk/tests/test_repetition_guard.py` passed (8 tests).
+  - `npm run build` (desktop-app) passed.
+## Progress Update 2026-02-07 13:00 (Memory UX Round 3: 命中解释可视化)
+- Completed Memory page visual + readability upgrade (Chinese UI cleanup):
+  - Rewrote `desktop-app/src/pages/Memory.tsx` with clean Chinese copy and stable controls.
+  - Rewrote memory components:
+    - `desktop-app/src/components/memory/MemoryCard.tsx`
+    - `desktop-app/src/components/memory/MemoryList.tsx`
+    - `desktop-app/src/components/memory/SearchBar.tsx`
+- Added “命中解释” visualization in search results:
+  - Displays `综合分 / 检索分 / 向量分 / 关键词分 / 重要度加分 / 时效加分` per memory card.
+  - Supports one-click toggle for score explanation visibility in the Memory header.
+  - Keeps search mode toggle (`混合检索` vs `向量检索`) and aligns copy with Chinese users.
+- Type contract extended for frontend memory rendering:
+  - `desktop-app/src/types/agent.ts` adds optional `final_score/score/vector_score/text_score/source` on `Memory`.
+- Validation:
+  - `npm run build` (desktop-app) passed.
+  - `python -m unittest agent-sdk/tests/test_memory_manager.py agent-sdk/tests/test_goal_manager.py agent-sdk/tests/test_repetition_guard.py` passed.
+## Progress Update 2026-02-07 13:10 (Memory UX Round 4: 命中原因标签)
+- Continued memory explainability upgrade for business readability:
+  - `desktop-app/src/components/memory/MemoryCard.tsx`
+  - Added “命中原因标签” in explanation panel (e.g. `关键词直匹配` / `语义向量召回` / `高重要度` / `高频访问` / `近期记忆`).
+  - Reason chips are inferred from retrieval source + importance + access count + recency signals.
+- This round reduces cognitive load for non-technical users: they can see *why* a memory surfaced before reading raw scores.
+- Validation:
+  - `npm run build` (desktop-app) passed.
+  - `python -m unittest agent-sdk/tests/test_memory_manager.py agent-sdk/tests/test_goal_manager.py agent-sdk/tests/test_repetition_guard.py` passed.
+## Progress Update 2026-02-07 13:30 (Memory UX Round 5: 排序/筛选/导出增强)
+- Continued with higher delivery density on Memory module (functional-first):
+  - `desktop-app/src/pages/Memory.tsx`
+  - Added multi-mode sorting:
+    - `按综合分排序`
+    - `按时间排序`
+    - `按重要度排序`
+  - Added source filtering (`全部来源 / 关键词直匹配 / 语义向量 / 关键词检索`).
+  - Added one-click focus filter `仅看高优先级` (importance >= 8).
+  - Added export of current filtered view:
+    - `导出 JSON`
+    - `导出 CSV`
+  - Added “可解释命中”统计，便于评估检索解释覆盖率。
+- Kept existing explainability path intact (reason chips + score breakdown), and integrated with new sorting/filtering pipeline.
+- Validation:
+  - `npm run build` (desktop-app) passed.
+  - `python -m unittest agent-sdk/tests/test_memory_manager.py agent-sdk/tests/test_goal_manager.py agent-sdk/tests/test_repetition_guard.py` passed.
+## Progress Update 2026-02-07 14:00 (Memory Anti-Corrosion Round 1)
+- Backend anti-corrosion capability delivered in `agent-sdk/core/memory.py`:
+  - Added freshness metadata on save (`ttl_days` / `verified_at` / `expires_at`) by memory type.
+  - Added conflict detection for factual memories (e.g. same key with different email/phone/fact value), marking `conflict_status=pending_review` and cross-linking conflict ids.
+  - Added stale/conflict-aware reranking penalties to reduce outdated/conflicting memories being surfaced.
+  - Search/list payload now carries `metadata`, `stale`, `conflict_status` for frontend explainability.
+  - Added maintenance compaction API logic (`compact_memories`): near-duplicate cleanup + stale low-value noise pruning.
+- Backend API exposed:
+  - `POST /memory/maintenance/compact`
+  - params: `user_id`, `dedupe_threshold`, `stale_days`, `dry_run`.
+- Frontend memory page enhanced:
+  - Added one-click `抗腐蚀维护` action (calls compact API) and result feedback banner.
+  - Memory card now highlights `已过期待确认` / `存在冲突待确认`.
+  - Memory export now includes `stale` and `conflict_status` fields.
+- Added/updated tests:
+  - `agent-sdk/tests/test_memory_manager.py` now covers:
+    - freshness metadata injection,
+    - factual conflict tagging,
+    - compaction stale pruning,
+    - existing dedupe/rerank tests.
+- Validation:
+  - `python -m py_compile agent-sdk/core/memory.py agent-sdk/main.py agent-sdk/core/agent.py agent-sdk/core/audit_logger.py` passed.
+  - `python -m unittest agent-sdk/tests/test_memory_manager.py agent-sdk/tests/test_goal_manager.py agent-sdk/tests/test_repetition_guard.py` passed (11 tests).
+  - `npm run build` (desktop-app) passed.
+## Progress Update 2026-02-07 14:20 (Memory Anti-Corrosion Round 2: 冲突处理闭环 + 维护预览)
+- Completed anti-corrosion operational loop closure:
+  - Backend conflict resolution API:
+    - `POST /memory/{memory_id}/resolve-conflict?action=accept_current|keep_all`
+    - resolves selected memory and propagates linked conflict states (`resolved` / `superseded`).
+  - Frontend conflict handling action:
+    - Memory card supports one-click conflict confirmation for `pending_review` items.
+  - Added maintenance dry-run preview in Memory page:
+    - `预览维护` calls compact API with `dry_run=true` and reports would-be dedupe/prune counts.
+- Backend structure updates:
+  - `MemoryManager.resolve_conflict(...)` added.
+  - `list_memories`/search pipeline now consistently surfaces conflict/stale fields for UI and export.
+- Frontend UX updates:
+  - Memory action bar adds `预览维护` next to `抗腐蚀维护`.
+  - Memory list wiring supports conflict resolve callback from page to card.
+- Test expansion:
+  - Added `resolve_conflict` regression test in `agent-sdk/tests/test_memory_manager.py`.
+  - Test suite now covers freshness, conflict detection, conflict resolution, and compaction.
+- Validation:
+  - `python -m py_compile agent-sdk/core/memory.py agent-sdk/main.py` passed.
+  - `python -m unittest agent-sdk/tests/test_memory_manager.py agent-sdk/tests/test_goal_manager.py agent-sdk/tests/test_repetition_guard.py` passed (12 tests).
+  - `npm run build` (desktop-app) passed.
+## Progress Update 2026-02-07 14:40 (Memory Anti-Corrosion Round 3: 巡检计划 + 冲突队列)
+- Added scheduled maintenance capability in backend memory service:
+  - `run_scheduled_maintenance(...)` with interval gating (`memory_maintenance_last_run`) and optional force run.
+  - New APIs:
+    - `POST /memory/maintenance/auto-run`
+    - `GET /memory/maintenance/report`
+    - `GET /memory/conflicts`
+- Added report/conflict data capabilities:
+  - `list_conflicts(...)` for queue-style conflict triage.
+  - `get_maintenance_report(...)` for non-mutating anti-corrosion inspection metrics.
+- Frontend Memory page now supports operational巡检 flow:
+  - page load triggers scheduled auto-run check (due-based).
+  - maintenance report summary cards added (pending conflicts / stale / dedupe candidates / stale prune candidates).
+  - added `仅看待处理冲突` quick filter to focus conflict queue in current list.
+- Frontend service/types expanded for new maintenance/conflict endpoints and result models.
+- Tests expanded:
+  - maintenance report counts test,
+  - scheduled maintenance due/skip behavior test.
+- Validation:
+  - `python -m py_compile agent-sdk/core/memory.py agent-sdk/main.py agent-sdk/core/agent.py agent-sdk/core/audit_logger.py` passed.
+  - `python -m unittest agent-sdk/tests/test_memory_manager.py agent-sdk/tests/test_goal_manager.py agent-sdk/tests/test_repetition_guard.py` passed (14 tests).
+  - `npm run build` (desktop-app) passed.
+## Progress Update 2026-02-07 15:00 (Main Chain Focus: Goals -> Workbench Execution Jump)
+- Shifted focus from deep memory-only work back to core product chain (goal execution loop):
+  - `desktop-app/src/pages/Goals.tsx`
+  - Added one-click `开始执行` actions in three places:
+    - goal tree task row,
+    - filtered task list row,
+    - task detail drawer.
+- New behavior:
+  - clicking `开始执行` auto-creates a dedicated chat session for that task,
+  - binds `goal_task_id` to the new session,
+  - navigates directly to `/workbench` for immediate execution.
+- This strengthens your target path:
+  - KPI/OKR/项目/任务管理 -> 进入执行 -> Agent处理 -> 回写进度/审计回放.
+- Validation:
+  - `npm run build` (desktop-app) passed.
+  - `python -m unittest agent-sdk/tests/test_memory_manager.py agent-sdk/tests/test_goal_manager.py agent-sdk/tests/test_repetition_guard.py` passed.
+## Progress Update 2026-02-07 15:20 (Main Chain Focus: Workbench Task Execution Panel)
+- Continued shifting from module-deepening to core execution chain delivery.
+- Goals/Workbench chain enhancements:
+  - Backend goals tasks listing now supports `task_id` filter for direct task lookup (`GoalManager.list_tasks` + `/goals/tasks`).
+  - Frontend service `listGoalTasks` now supports `taskId` option.
+  - Workbench now renders active task execution panel when session has `goal_task_id`:
+    - shows bound task title/status/progress,
+    - shows completion writeback badge when task status is `done`,
+    - provides quick execution prompts (one-click send) to start agent actions immediately.
+- This closes a key experience gap:
+  - from Goals page `开始执行` jump -> Workbench sees concrete task context -> one-click structured execution prompts -> execution/writeback loop.
+- Added regression test for new `task_id` filter path:
+  - `agent-sdk/tests/test_goal_manager.py::test_list_tasks_filter_by_task_id`.
+- Validation:
+  - `python -m py_compile agent-sdk/core/goal_manager.py agent-sdk/main.py agent-sdk/core/memory.py` passed.
+  - `python -m unittest agent-sdk/tests/test_goal_manager.py agent-sdk/tests/test_memory_manager.py agent-sdk/tests/test_repetition_guard.py` passed (15 tests).
+  - `npm run build` (desktop-app) passed.
+
+## Progress Update 2026-02-07 17:15 (Main Chain: Task Review Acceptance/Rejection)
+- Completed goal-task human review loop for the execution main chain.
+- Backend:
+  - added `GoalTaskReviewRequest` model and `/goals/task/{task_id}/review` API.
+  - `GoalManager.review_task(...)` now supports `accept/reject`, writes review metadata, and updates progress roll-up.
+  - completion path now sets `review_status=pending` to make post-execution acceptance explicit.
+- Frontend:
+  - Goals detail drawer now includes `人工验收` panel with `验收通过/驳回返工` actions and reviewer notes.
+  - task list and detail both display localized review status (`待验收/已验收/已驳回`).
+  - review metadata (`reviewed_by/reviewed_at/review_note`) is visible in task details.
+- Tests and validation:
+  - added goal manager tests for accept/reject transitions and invalid decision handling.
+  - `python -m py_compile agent-sdk/core/goal_manager.py agent-sdk/main.py agent-sdk/core/memory.py` passed.
+  - `python -m unittest agent-sdk/tests/test_goal_manager.py agent-sdk/tests/test_memory_manager.py agent-sdk/tests/test_repetition_guard.py` passed (17 tests).
+  - `npm run build` (desktop-app) passed.
+
+## Progress Update 2026-02-07 17:21 (Main Chain: 待验收筛选 + 批量验收)
+- Continued main-chain delivery on Goals operations instead of deep single-module polishing.
+- Backend:
+  - goals task listing now supports `review_status` filter (pending/accepted/rejected).
+  - `GET /goals/tasks` accepts `review_status` query param and passes through to goal manager.
+- Frontend:
+  - Goals task filters now include review-status selector.
+  - Added one-click `仅看待验收` quick filter.
+  - Added batch review operation area:
+    - visible-task checkbox selection,
+    - `批量验收通过` / `批量驳回返工`,
+    - optional batch review note.
+- Tests and validation:
+  - Added `GoalManager` test for `review_status` filtering behavior.
+  - `python -m py_compile agent-sdk/core/goal_manager.py agent-sdk/main.py` passed.
+  - `python -m unittest agent-sdk/tests/test_goal_manager.py agent-sdk/tests/test_memory_manager.py agent-sdk/tests/test_repetition_guard.py` passed (18 tests).
+  - `npm run build` (desktop-app) passed.
+
+## Progress Update 2026-02-07 17:23 (Main Chain: Workbench 待验收提醒跳转)
+- Implemented workbench-to-review reminder bridge after execution writeback:
+  - Workbench now detects bound task with `status=done` and `review_status=pending`.
+  - Shows clear reminder card with `前往任务验收` and `暂不处理` actions.
+- Added direct jump path:
+  - clicking `前往任务验收` navigates to Goals page with `task_id` query.
+  - Goals page auto-opens that task detail drawer and triggers audit replay loading for immediate review context.
+- This shortens the manager loop:
+  - 执行成功 -> 回写完成 -> 待验收提醒 -> 一键跳转验收。
+- Validation:
+  - `npm run build` (desktop-app) passed.
+
+## Progress Update 2026-02-07 17:26 (Main Chain: 验收后自动回跳 Workbench + 结果提示)
+- Added round-trip review flow between Workbench and Goals:
+  - Workbench jump now carries source marker: `/goals?task_id=...&from=workbench`.
+  - Goals review success (accept/reject) now auto-navigates back to Workbench with result query.
+- Added review-result feedback in Workbench:
+  - Workbench reads `review_task_id` + `review_result` query and shows localized result toast.
+  - feedback auto-clears after 8 seconds to avoid persistent visual noise.
+- User flow now:
+  - Workbench execution -> pending reminder -> jump to review -> approve/reject -> auto-return Workbench with result status.
+- Validation:
+  - `npm run build` (desktop-app) passed.
+
+## Progress Update 2026-02-07 17:28 (Main Chain: 驳回返工快捷执行)
+- Improved post-review actionability in Workbench feedback area:
+  - after reject return, Workbench now shows one-click actions:
+    - `一键生成返工计划`
+    - `开始返工第一步`
+  - after accept return, Workbench now shows one-click action:
+    - `规划下一阶段任务`
+- All actions directly send structured prompts in current session, reducing manager-to-execution handoff friction.
+- Validation:
+  - `npm run build` (desktop-app) passed.
+
+## Progress Update 2026-02-07 17:33 (Main Chain: Plan/Do/Verify 执行器 + 可中断恢复)
+- Added session-level execution flow state persistence in chat store:
+  - new `sessionExecutionFlowMap` persisted with session data.
+  - tracks `taskId`, `phase(plan/do/verify)`, `note`, `updatedAt`.
+- Workbench now has a task execution cockpit:
+  - `Plan：生成计划` / `Do：开始执行` / `Verify：验证交付`
+  - `恢复当前阶段` to continue interrupted runs
+  - `恢复备注` save/load for interruption context
+  - `重置流程` for clean restart.
+- Review linkage integration:
+  - on reject return, flow auto-switches to `do` stage.
+  - on accept return, flow auto-switches to `verify` stage.
+- Validation:
+  - `npm run build` (desktop-app) passed.
+
+## Progress Update 2026-02-07 17:50 (Lightweight Target: Route-Level Lazy Loading)
+- Implemented page-level code splitting in app router:
+  - Workbench / Memory / Skills / Goals / Settings now loaded via `React.lazy`.
+  - Added page-level `Suspense` fallback (`页面加载中...`).
+- Outcome:
+  - removed large single-chunk warning and significantly reduced initial bundle size.
+  - current build output now shows per-page chunks (e.g., `Goals-*.js`, `Workbench-*.js`) instead of one oversized entry chunk.
+- Validation:
+  - `npm run build` (desktop-app) passed.
+
+## Progress Update 2026-02-07 17:53 (Demo Readiness: 一键演示数据 + 演示脚本)
+- Added `一键生成演示数据` in Goals page:
+  - auto-creates a demo KPI / OKR / project / 3 tasks for quick live demo setup.
+  - auto-selects created hierarchy and refreshes tree/list data.
+- Added demo operation playbook:
+  - `docs/demo-runbook.md` covers 10-minute speaking + click path.
+  - includes fallback handling for common on-stage issues.
+- Validation:
+  - `npm run build` (desktop-app) passed.
+
+## Progress Update 2026-02-07 18:01 (Execution Engine v1: 后端任务阶段状态机落地)
+- Backend added persisted task execution state model (GoalManager):
+  - new tables: `task_execution_flows`, `task_execution_events`.
+  - supports state read/update/resume for phases `plan/do/verify`.
+- Added Goal APIs:
+  - `GET /goals/task/{task_id}/execution/state`
+  - `POST /goals/task/{task_id}/execution/phase`
+  - `POST /goals/task/{task_id}/execution/resume`
+- Frontend Workbench now uses backend execution-state APIs:
+  - phase switch persists to backend.
+  - resume button uses backend-generated `resume_prompt`.
+  - notes/reset now sync backend state, not only local memory.
+- Testing and validation:
+  - added GoalManager unit tests for phase update/readback/resume/invalid input.
+  - `python -m py_compile agent-sdk/core/goal_manager.py agent-sdk/main.py agent-sdk/models/request.py` passed.
+  - `python -m unittest agent-sdk/tests/test_goal_manager.py agent-sdk/tests/test_memory_manager.py agent-sdk/tests/test_repetition_guard.py` passed (21 tests).
+  - `npm run build` (desktop-app) passed.
+
+## Progress Update 2026-02-07 18:10 (Manager MVP: 老板看板 + 记忆页乱码修复)
+- Fixed Memory page Chinese mojibake for demo readability:
+  - restored key UI labels/buttons/filter texts and maintenance notices to proper Chinese.
+- Added manager dashboard MVP backend:
+  - `GET /goals/dashboard` with optional `from_time/to_time/limit`.
+  - returns summary cards + owner aggregate rows.
+- Added manager dashboard MVP frontend:
+  - new page `/board` with 4 key cards:
+    - 待验收 / 进行中 / 已验收 / 驳回返工
+  - owner task table with completion rate, avg progress, latest update.
+  - sidebar entry `看板` added.
+- Testing and validation:
+  - added GoalManager test for dashboard summary/owner aggregation.
+  - `python -m py_compile agent-sdk/core/goal_manager.py agent-sdk/main.py agent-sdk/models/request.py` passed.
+  - `python -m unittest agent-sdk/tests/test_goal_manager.py agent-sdk/tests/test_memory_manager.py agent-sdk/tests/test_repetition_guard.py` passed (22 tests).
+  - `npm run build` (desktop-app) passed.
+
+## Progress Update 2026-02-07 18:22 (Manager UX: 看板到目标页联动筛选)
+- Added board-to-goals deep-link actions per assignee row:
+  - `查看任务` -> `/goals?assignee=...`
+  - `待验收` -> `/goals?assignee=...&review_status=pending`
+- Goals page now parses query filters and auto-applies:
+  - `assignee`, `status`, `review_status`, `from_time`, `to_time`
+  - enabling manager click-through from board to actionable task list.
+- Validation:
+  - `npm run build` (desktop-app) passed.
+
+## Progress Update 2026-02-07 18:28 (Manager Demo UX: 游戏风看板 + 一键发起执行)
+- Enhanced board visualization for demo storytelling:
+  - added `表格 / 游戏风` toggle mode.
+  - game mode shows pixel-style mini avatars per assignee (click to open owner detail panel).
+- Added assignee detail panel in board:
+  - shows owner projects, completion rate, avg progress, latest update.
+- Added one-click execution launch from board:
+  - resolves owner next task (`next_task_id` / pending-review fallback / todo fallback),
+  - auto-creates Workbench session, binds `goal_task_id`, and navigates to `/workbench`.
+- Backend dashboard aggregation enriched:
+  - owner rows now include `project_titles` and `next_task_id`.
+- Validation:
+  - `python -m unittest agent-sdk/tests/test_goal_manager.py` passed.
+  - `python -m unittest agent-sdk/tests/test_goal_manager.py agent-sdk/tests/test_memory_manager.py agent-sdk/tests/test_repetition_guard.py` passed (22 tests).
+  - `npm run build` (desktop-app) passed.
+
+## Progress Update 2026-02-07 18:34 (Testing + Realistic Data Injection)
+- Added reusable realistic data seed script:
+  - `scripts/seed_realistic_demo_data.py`
+  - injects multi-KPI/OKR/project/task dataset with mixed states:
+    - todo / done-pending-review / accepted / rejected
+    - plus execution phase states and resume records.
+- Executed seed with reset for immediate demo dataset:
+  - `python scripts/seed_realistic_demo_data.py --reset`
+  - seeded 14 tasks; summary:
+    - total 14 / pending_review 3 / in_progress 5 / accepted 6 / rejected 2.
+- Regression validation rerun after seeding:
+  - `python -m unittest agent-sdk/tests/test_goal_manager.py agent-sdk/tests/test_memory_manager.py agent-sdk/tests/test_repetition_guard.py` passed (22 tests).
+  - `npm run build` (desktop-app) passed.
+
+## Progress Update 2026-02-07 18:42 (Board Polish: 游戏风状态动画 + 再次压测数据)
+- Board game-style view upgraded:
+  - avatar now has status-driven visual cues:
+    - 待验收 / 返工：脉冲提示
+    - 执行中：跳动提示
+    - 状态良好：静态
+  - added per-owner status badge for faster manager scan.
+- Improved board readability:
+  - fully normalized Chinese labels in board page (header/cards/table/actions).
+- Expanded demo data volume by running seed script again:
+  - `python scripts/seed_realistic_demo_data.py`
+  - current sample summary: total 28 / pending_review 6 / in_progress 10 / accepted 12 / rejected 4.
+- Validation:
+  - `python -m unittest agent-sdk/tests/test_goal_manager.py agent-sdk/tests/test_memory_manager.py agent-sdk/tests/test_repetition_guard.py` passed (22 tests).
+  - `npm run build` (desktop-app) passed.
+
+## Progress Update 2026-02-07 18:46 (Demo Data Consistency Fix)
+- Found data-path mismatch during board demo:
+  - desktop runtime may read `agent-sdk/data/goals.db`, while previous seed used `./data/goals.db`.
+- Updated seed utility:
+  - `scripts/seed_realistic_demo_data.py` now supports `--all-targets`
+  - one command seeds both `./data` and `./agent-sdk/data`.
+- Executed:
+  - `python scripts/seed_realistic_demo_data.py --all-targets --reset`
+  - both data paths now show identical summary:
+    - total 14 / pending_review 3 / in_progress 5 / accepted 6 / rejected 2.
+- Validation:
+  - `python -m unittest agent-sdk/tests/test_goal_manager.py` passed.
+
+## Progress Update 2026-02-07 18:52 (Board Interaction: 任务气泡 + 指定任务发起)
+- Added owner-level task bubble area in board detail panel:
+  - loads assignee task list and renders status-colored task bubbles.
+  - bubble click now launches Workbench session bound to that specific task id.
+- Improved game-mode card readability:
+  - shows `下一任务 #id` hint directly on each assignee card.
+- Re-seeded both data paths for immediate visual verification:
+  - `python scripts/seed_realistic_demo_data.py --all-targets --reset`
+  - summary remains: total 14 / pending_review 3 / in_progress 5 / accepted 6 / rejected 2.
+- Validation:
+  - `npm run build` (desktop-app) passed.
+
+## Progress Update 2026-02-07 18:48 (Board UX: 任务气泡二段操作)
+- Refined owner task bubbles to avoid accidental execution on single click:
+  - bubble click now selects task and opens action panel.
+  - action panel supports:
+    - `发起此任务执行`
+    - `查看任务详情` (jump to Goals task drawer by `task_id`).
+- This improves demo controllability:
+  - managers can preview selected task status before starting execution.
+- Validation:
+  - `npm run build` (desktop-app) passed.
+
+## Progress Update 2026-02-07 18:56 (Board Scheduling: 设为下一任务)
+- Added manager scheduling override for next task:
+  - backend table `assignee_next_tasks` stores per-assignee preferred next task.
+  - new API `POST /goals/dashboard/next-task` to set override.
+  - dashboard owner rows now honor this override via `next_task_id`.
+- Frontend board integration:
+  - selected task panel now supports `设为下一任务`.
+  - header shows current `next_task_id`, so manager sees scheduling effect immediately.
+- Tests and validation:
+  - added GoalManager test for next-task override path.
+  - `python -m unittest agent-sdk/tests/test_goal_manager.py` passed (12 tests).
+  - `python -m unittest agent-sdk/tests/test_goal_manager.py agent-sdk/tests/test_memory_manager.py agent-sdk/tests/test_repetition_guard.py` passed (23 tests).
+  - `npm run build` (desktop-app) passed.
+
+## Progress Update 2026-02-07 19:18 (Demo Data Rename + Encoding Repair Tool)
+- Updated demo assignee names (removed placeholders like ����/����):
+  - now uses: `Ava Chen`, `Leo Wang`, `Iris Zhou`, `Noah Xu`.
+  - file: `scripts/seed_realistic_demo_data.py`.
+- Added historical text-repair script for local demo DBs:
+  - new file: `scripts/repair_demo_text.py`
+  - supports repairing potential mojibake records in:
+    - `goals.db` task/flow/event text fields
+    - `memories.db` semantic memory and preference text fields.
+- Re-seeded both runtime data paths:
+  - `python scripts/seed_realistic_demo_data.py --all-targets --reset`
+  - summary: total 14 / pending_review 3 / in_progress 5 / accepted 6 / rejected 2.
+- Executed encoding repair pass:
+  - `python scripts/repair_demo_text.py`
+  - result: no remaining broken rows in current demo DBs.
+- Validation:
+  - `python -m unittest agent-sdk/tests/test_goal_manager.py agent-sdk/tests/test_memory_manager.py agent-sdk/tests/test_repetition_guard.py` passed (23 tests).
+  - `npm run build` (desktop-app) passed.
+
+## Progress Update 2026-02-07 19:42 (Board: Boss Dispatch Center MVP)
+- Added a new ���ϰ��ɵ����ġ� block on board page (`/board`):
+  - select project from goals tree
+  - fill task title / assignee / due time / reviewer / requirement
+  - one-click create task from board
+- Dispatch flow integration:
+  - optionally auto-set the newly created task as assignee ��next task��
+  - optionally auto-jump to Workbench and bind the new task for immediate execution
+- Added assignee quick suggestions in dispatch form from current dashboard owner list.
+- Kept it lightweight by reusing existing task schema:
+  - dispatch metadata (due/reviewer/requirement) stored in task description with structured header `[�ɵ���Ϣ]`.
+- Validation:
+  - `npm run build` (desktop-app) passed.
+  - `python -m unittest agent-sdk/tests/test_goal_manager.py` passed (12 tests).
+
+## Progress Update 2026-02-07 19:56 (Board: ת�˹������� + һ���������)
+- �ڿ���������ת�˹������ء�ģ�飺
+  - ������Դ��`review_status = rejected` �����б���֧�� from/to ʱ��ɸѡ����
+  - ������ʾ��Agent �޷���� -> ת�˹����֡�����С�ջ���
+- ÿ��ת�˹�����֧�����ද����
+  - `���� Workbench �޸�`���Զ��󶨸����񲢽���ִ�лỰ��
+  - `�鿴��������`����ת Goals ����鿴�����ģ�
+- ��������߼��Ż���
+  - �Ǳ��̾ۺ�������ת�˹������б����м��أ����ٵȴ��С�
+- Validation:
+  - `npm run build` (desktop-app) passed.
+  - `python -m unittest agent-sdk/tests/test_goal_manager.py` passed (12 tests).
+
+## Progress Update 2026-02-07 20:12 (Handoff Workflow: Claim + 7d Trend)
+- Added rejected-task handoff claim API and persistence:
+  - new endpoint: `POST /goals/task/{task_id}/handoff/claim`
+  - task now records handoff metadata:
+    - `handoff_status` (`none|pending|claimed|resolved`)
+    - `handoff_owner`, `handoff_note`, `handoff_at`, `handoff_resolved_at`
+  - reject review now marks task as `handoff_status=pending`; accept review resolves claimed handoff.
+- Extended task list filters for handoff dimensions:
+  - backend `/goals/tasks` now supports `handoff_status` and `handoff_owner`.
+  - frontend `AgentService.listGoalTasks` now supports these params.
+- Board handoff pool upgraded:
+  - ��ת�˹������ء� now defaults to rejected + `handoff_status=pending` queue.
+  - added �����ֲ����� Workbench�� action (claim + bind task + jump).
+  - added 7-day trend cards for:
+    - rejected count
+    - pending-review count
+    - claimed-handoff count
+- Added backend unit test coverage:
+  - `test_claim_handoff_and_filter` in `agent-sdk/tests/test_goal_manager.py`.
+- Re-seeded demo data for both runtime paths:
+  - `python scripts/seed_realistic_demo_data.py --all-targets --reset`.
+- Validation:
+  - `python -m unittest agent-sdk/tests/test_goal_manager.py agent-sdk/tests/test_memory_manager.py agent-sdk/tests/test_repetition_guard.py` passed (24 tests).
+  - `npm run build` (desktop-app) passed.
+
+## Progress Update 2026-02-07 20:24 (Handoff Pool: SLA + Assignee Filter + Notify)
+- Upgraded board handoff pool UX for demo operations:
+  - Added assignee filter (all / by owner) in handoff queue.
+  - Added wait-time calculation and 24h SLA timeout highlighting per handoff task.
+  - Added one-click "֪ͨ������ִ��" action:
+    - sets task as assignee next-task
+    - directly launches bound Workbench session for the task.
+- Kept existing "���ֲ����� Workbench" claim action for manager takeover.
+- Validation:
+  - `npm run build` (desktop-app) passed.
+  - `python -m unittest agent-sdk/tests/test_goal_manager.py` passed (13 tests).
+
+## Progress Update 2026-02-07 20:33 (Handoff Pool: Batch Actions)
+- Added batch operations for handoff queue in board page:
+  - select per-task checkbox
+  - select-all for current filtered list
+  - batch notify assignees (set next-task in bulk)
+  - batch claim handoff (manager bulk takeover)
+- This improves manager-side dispatch speed during demos and real operations.
+- Validation:
+  - `npm run build` (desktop-app) passed.
+  - `python -m unittest agent-sdk/tests/test_goal_manager.py` passed (13 tests).
+
+## Progress Update 2026-02-07 20:52 (Workbench Speed Pass v1)
+- Focused on workbench response latency (dialog + agent + skill path) by tuning agent defaults:
+  - Auto web search now conservative by default:
+    - only explicit search intent triggers network search
+    - weak intent keywords (`����/����/�ȵ�...`) only trigger when `AUTO_WEB_SEARCH=true`
+  - Memory retrieval load reduced:
+    - `MEMORY_TOP_K` default changed `5 -> 3`
+    - important memory per type now controlled by `MEMORY_IMPORTANT_PER_TYPE` (default `2`)
+  - Web search result size reduced:
+    - auto-search results now controlled by `AUTO_SEARCH_NUM_RESULTS` (default `5`, previously hardcoded `10`)
+- Validation:
+  - `python -m py_compile agent-sdk/core/agent.py` passed.
+  - `python -m unittest agent-sdk/tests/test_repetition_guard.py agent-sdk/tests/test_goal_manager.py` passed (15 tests).
+
+## Progress Update 2026-02-07 21:10 (Skills Compatibility: Local Upload + Create Scaffold)
+- Extended skill lifecycle to cover all three user paths:
+  - GitHub install (existing)
+  - Local install (new): folder/zip path with `SKILL.md`
+  - Skill creation (new): scaffold generator for custom skills
+- Backend APIs added:
+  - `POST /skills/install/local` (request: `path`)
+  - `POST /skills/create` (request: `name/display_name/description/category/trigger_keywords/tags`)
+- Installer enhancements:
+  - local package detection and copy
+  - scaffold generation (`SKILL.md`, `template.json`, `scripts/main.py`)
+  - manifest tracking for `local` / `created` sources
+- Frontend Skills dialog upgraded:
+  - mode switch tabs: `GitHub ����` / `�����ϴ�` / `���� Skill`
+  - wired to new agent service methods and backend endpoints
+- Validation:
+  - `python -m py_compile agent-sdk/core/skill_installer.py agent-sdk/main.py agent-sdk/models/request.py` passed.
+  - `python -m unittest agent-sdk/tests/test_goal_manager.py agent-sdk/tests/test_repetition_guard.py` passed (15 tests).
+  - `npm run build` (desktop-app) passed.
+
+## Progress Update 2026-02-07 21:32 (Workbench Tool Feedback UI hardening)
+- Improved chat rendering reliability and tool-call visibility for demo flows:
+  - Reworked `Message` component text cleanup + Chinese UI copy fixes.
+  - Enhanced `ToolCallCard` with tool kind badges (`Skill/内置/桌面/MCP`), safer detail rendering, and clearer statuses.
+  - Extended chat type model with `ToolCallInfo.kind` to support richer tool UX.
+- Note:
+  - During this round, `Workbench.tsx` had transient corruption while patching and was restored to the previous stable version to keep build green.
+- Validation:
+  - `npm run build` (desktop-app) passed.
+  - `python -m py_compile agent-sdk/main.py agent-sdk/core/skill_installer.py agent-sdk/models/request.py agent-sdk/core/agent.py` passed.
+  - `python -m unittest agent-sdk/tests/test_goal_manager.py agent-sdk/tests/test_repetition_guard.py agent-sdk/tests/test_memory_manager.py` passed (24 tests).
+
+## Progress Update 2026-02-07 21:48 (Workbench streaming UX + skill tool visibility)
+- Continued Workbench delivery for demo-critical UX:
+  - Added immediate first-response placeholder (`Working on it...`) to reduce perceived latency.
+  - Added tool kind tagging in stream handling (`skill/system/desktop/mcp/other`) so Tool cards can show call type.
+  - Desktop permission flow tool cards now explicitly tagged as `desktop`.
+  - Improved tool result matching to prefer the latest running call (avoid mismatching same tool name in multi-step loops).
+  - Search start now updates assistant text immediately when content is still empty.
+  - Stream fallback handling now appends `chunk.message` (instead of overwriting accumulated content).
+- Validation:
+  - `npm run build` (desktop-app) passed.
+  - `python -m unittest agent-sdk/tests/test_repetition_guard.py` passed.
+
+## Progress Update 2026-02-07 21:58 (Workbench tool timeline strip)
+- Added a lightweight execution timeline strip in Workbench, right below the header:
+  - shows live `Searching` state
+  - shows current tool calls as chips with `[kind] tool · status`
+  - kinds include `Skill/System/Desktop/MCP/Tool`
+- This improves demo readability for “boss assigns -> agent executes skill/tool” flow without adding heavy UI complexity.
+- Validation:
+  - `npm run build` (desktop-app) passed.
+  - `python -m unittest agent-sdk/tests/test_goal_manager.py agent-sdk/tests/test_repetition_guard.py` passed (15 tests).
+
+## Progress Update 2026-02-07 22:08 (Workbench timeline drill-down)
+- Upgraded Workbench timeline chips from passive labels to interactive controls:
+  - each chip is now clickable and highlights the selected tool call
+  - selected call shows a compact detail panel (tool, status, input, message, data)
+- Added safe formatter for timeline payloads to avoid render/runtime errors when tool data is nested.
+- UX effect: demo users can now see not only “which skill/tool was called” but also “what was passed in and returned” directly in Workbench.
+- Validation:
+  - `npm run build` (desktop-app) passed.
+  - `python -m unittest agent-sdk/tests/test_repetition_guard.py` passed.
+
+## Progress Update 2026-02-07 22:26 (Recording-ready demo flow package)
+- Added Workbench recording shortcuts for end-to-end demo flow:
+  - top quick-nav buttons to `Skills / Goals / Board`
+  - one-click scenario prompts for:
+    - search + PPT/email draft
+    - add/test skill in Workbench
+    - desktop file organize + summary
+    - memory recall (who am I)
+- Added a new built-in skill: `demo-office-assistant`
+  - tools:
+    - `demo_prepare_ppt_and_email`
+    - `demo_organize_files`
+    - `demo_summarize_folder`
+  - includes local output files and safe `dry_run` support for organize flow.
+- Added a dedicated recording checklist document:
+  - `docs/recording-demo-checklist.md`
+- Validation:
+  - `npm run build` (desktop-app) passed.
+  - `python -m py_compile agent-sdk/skills/demo-office-assistant/app/main.py agent-sdk/core/agent.py agent-sdk/core/skills_loader.py` passed.
+  - `python -m unittest agent-sdk/tests/test_goal_manager.py agent-sdk/tests/test_repetition_guard.py` passed (15 tests).
+  - skill loader check: `demo-office-assistant` loaded with 3 tools.
+
+## Progress Update 2026-02-07 22:34 (Hotfix: goal_task_id stream compatibility)
+- Fixed backend stream crash when Workbench sends `goal_task_id`:
+  - `ClaudeAgent.chat_stream` now accepts optional `goal_task_id` parameter for compatibility with `/chat/stream` caller.
+- Root cause:
+  - `main.py` passed `goal_task_id`, but `core/agent.py::chat_stream` signature did not include it.
+- Validation:
+  - `python -m py_compile agent-sdk/core/agent.py agent-sdk/main.py` passed.
+  - `python -m unittest agent-sdk/tests/test_goal_manager.py agent-sdk/tests/test_repetition_guard.py` passed (15 tests).
+
+## Progress Update 2026-02-07 22:52 (Workbench UX hotfix: scroll + collapsible panels + live status)
+- Addressed recording-time UX issues reported by user:
+  - Fixed message area usability by changing auto-scroll behavior:
+    - only auto-scroll when user is near bottom
+    - preserves manual scrolling during long responses/streaming
+  - Added collapsible controls for non-core panels:
+    - execution timeline panel can collapse/expand
+    - demo shortcut panel can collapse/expand
+  - Added live stream status strip:
+    - shows elapsed seconds while streaming
+    - shows current running/pending tool status when available
+- Validation:
+  - `npm run build` (desktop-app) passed.
+- Runtime guard tweak for demo responsiveness:
+  - tool-iteration cap is now env-configurable via `MAX_TOOL_ITERATIONS` (default `16`, previously fixed `50`).
+  - helps avoid very long tool loops in Workbench recording scenarios.
+- Follow-up UI polish per user feedback:
+  - timeline and demo panels are now collapsed by default.
+  - replaced mojibake placeholders (`????`) in Workbench top panels with stable labels.
+  - compacted timeline detail message area with max height + scroll.
+
+## Progress Update 2026-02-07 23:35 (Workbench Chinese cleanup + permission path hardening)
+- Removed Workbench demo shortcuts panel from the UI to reduce top-area clutter.
+- Fixed chat session naming behavior:
+  - new session default title is now `�¶Ի�`
+  - first user message auto-updates session title (trimmed)
+- Reworked key Workbench/chat UI text to avoid garbled characters:
+  - `ChatHistorySidebar`, `PermissionApprovalDialog`, `ToolCallCard`, and Workbench timeline/status labels are now clean Chinese copy.
+- Hardened desktop permission flow for deletion scenarios:
+  - added run-command delete intent fallback in desktop bridge (auto-route delete-like commands to `delete_file`)
+  - reduced terminal policy conflict reports during file deletion demos.
+- Updated agent tool guidance:
+  - `run_command` description now explicitly tells the model to use `delete_file` for deletion.
+- Validation:
+  - `npm run build` (desktop-app) passed.
+  - `cargo check` (desktop-app/src-tauri) passed.
+  - `python -m py_compile agent-sdk/core/agent.py` passed.

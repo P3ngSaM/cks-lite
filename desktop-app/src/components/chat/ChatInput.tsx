@@ -1,5 +1,5 @@
-import { useState, useRef, type KeyboardEvent } from 'react'
-import { Send, Paperclip, Loader2, Square } from 'lucide-react'
+import { useRef, useState, type KeyboardEvent } from 'react'
+import { Loader2, Paperclip, Send, Square } from 'lucide-react'
 import { cn } from '@/utils/cn'
 
 export interface ChatInputProps {
@@ -13,7 +13,7 @@ export const ChatInput = ({
   onSend,
   onStop,
   disabled,
-  placeholder = '输入消息...（Shift + Enter 换行）'
+  placeholder = '请输入消息…（Shift + Enter 换行）',
 }: ChatInputProps) => {
   const [message, setMessage] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -52,8 +52,7 @@ export const ChatInput = ({
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files
     if (files && files.length > 0) {
-      // TODO: 文件上传逻辑
-      console.log('Selected files:', files)
+      console.log('选择文件：', files)
     }
   }
 
@@ -63,7 +62,7 @@ export const ChatInput = ({
         {disabled && (
           <div className="flex items-center gap-2 mb-3 px-1">
             <Loader2 className="h-3.5 w-3.5 text-blue-400 animate-spin flex-shrink-0" />
-            <span className="text-xs text-blue-400">AI 正在处理中...</span>
+            <span className="text-xs text-blue-400">AI 正在处理中…</span>
             <div className="flex-1 h-0.5 bg-neutral-800 rounded-full overflow-hidden">
               <div className="h-full bg-blue-500/60 rounded-full animate-pulse" style={{ width: '60%' }} />
             </div>
@@ -86,7 +85,7 @@ export const ChatInput = ({
             onChange={handleInput}
             onKeyDown={handleKeyDown}
             disabled={disabled}
-            placeholder={disabled ? 'AI 正在执行中，请稍候...' : placeholder}
+            placeholder={disabled ? 'AI 正在执行，请稍候…' : placeholder}
             rows={1}
             className={cn(
               'w-full px-4 py-3 pr-24 pb-12 rounded-lg resize-none transition-colors',
@@ -139,9 +138,7 @@ export const ChatInput = ({
           />
         </div>
 
-        <p className="text-xs text-neutral-600 mt-3 text-center">
-          Enter 发送 · Shift + Enter 换行
-        </p>
+        <p className="text-xs text-neutral-600 mt-3 text-center">回车发送，Shift + 回车换行</p>
       </div>
     </div>
   )

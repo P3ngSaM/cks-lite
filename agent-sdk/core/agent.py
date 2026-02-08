@@ -1,4 +1,4 @@
-"""
+﻿"""
 Claude Agent 核心
 基于 Claude Agent SDK 实现的智能代理
 """
@@ -6,6 +6,10 @@ Claude Agent 核心
 import os
 import json
 import asyncio
+import time
+import re
+import base64
+import mimetypes
 from pathlib import Path
 from uuid import uuid4
 from typing import List, Dict, Optional, AsyncGenerator
@@ -24,7 +28,24 @@ from core.audit_logger import AuditLogger
 logger = logging.getLogger(__name__)
 
 # Desktop tool names that require frontend bridging
-DESKTOP_TOOLS = {"run_command", "read_file", "list_directory", "write_file"}
+DESKTOP_TOOLS = {
+    "run_command",
+    "read_file",
+    "list_directory",
+    "write_file",
+    "get_file_info",
+    "delete_file",
+    "get_platform_info",
+    "open_application",
+    "type_text",
+    "press_hotkey",
+    "send_feishu_message",
+    "send_desktop_message",
+    "capture_screen",
+    "mouse_move",
+    "mouse_click",
+    "mouse_scroll",
+}
 
 # Module-level dict to store asyncio.Future objects for desktop tool results
 _desktop_results: Dict[str, asyncio.Future] = {}
@@ -39,6 +60,41 @@ def update_repetition_state(
     if current_signature == last_signature:
         return current_signature, repeat_count + 1
     return current_signature, 1
+
+
+def make_tool_signature(tool_name: str, tool_input: Dict) -> str:
+    """Build a stable tool-call signature for repeated-call circuit breaker."""
+    try:
+        normalized = json.dumps(tool_input or {}, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        normalized = str(tool_input)
+    return f"{tool_name}:{normalized}"
+
+
+def is_transient_tool_error(result: Dict) -> bool:
+    """Heuristic: whether a tool failure is likely transient and worth one retry."""
+    if not isinstance(result, dict):
+        return False
+    if result.get("success", True):
+        return False
+    text = " ".join(
+        str(result.get(k, "") or "")
+        for k in ("error", "message")
+    ).lower()
+    transient_tokens = (
+        "timeout",
+        "temporarily",
+        "connection",
+        "network",
+        "rate limit",
+        "busy",
+        "temporary",
+        "429",
+        "502",
+        "503",
+        "504",
+    )
+    return any(token in text for token in transient_tokens)
 
 
 class MiniMaxAnthropic(Anthropic):
@@ -81,12 +137,14 @@ class ClaudeAgent:
         skills_loader: SkillsLoader,
         model: str = None,
         base_url: str = None,
-        skill_installer=None
+        skill_installer=None,
+        goal_manager=None,
     ):
         self.api_key = api_key
         self.memory_manager = memory_manager
         self.skills_loader = skills_loader
         self.skill_installer = skill_installer
+        self.goal_manager = goal_manager
 
         # 初始化 Claude 客户端（支持自定义 base_url）
         base_url = base_url or os.getenv("ANTHROPIC_BASE_URL")
@@ -110,6 +168,10 @@ class ClaudeAgent:
 
         # 会话历史（内存缓存）
         self.sessions = {}  # {session_id: [messages]}
+        self.session_skill_snapshots = {}  # {session_id: {version, skills, updated_at}}
+        self.session_memory_flush_state = {}  # {session_id: last_flush_cycle}
+        self.memory_flush_soft_chars = int(os.getenv("MEMORY_FLUSH_SOFT_CHARS", "12000"))
+        self.skill_tool_retry_max = max(1, int(os.getenv("SKILL_TOOL_RETRY_MAX", "2")))
 
         # 智能记忆提取器
         self.memory_extractor = IntelligentMemoryExtractor(self.async_client)
@@ -200,7 +262,8 @@ class ClaudeAgent:
 
 - **长期记忆**：上下文中的 "📝 相关记忆" 包含用户历史信息
 - **联网搜索**：`web_search` 工具（可多次调用）
-- **桌面操作**：`run_command`、`read_file`、`write_file`、`list_directory`
+- **桌面操作**：`run_command`、`read_file`、`write_file`、`list_directory`、`get_file_info`、`delete_file`、`get_platform_info`、`open_application`、`type_text`、`press_hotkey`、`send_desktop_message`、`send_feishu_message`、`capture_screen`、`mouse_move`、`mouse_click`、`mouse_scroll`
+- **视觉理解**：`analyze_screen`（基于 MiniMax 视觉模型分析截图并给出可执行建议）、`visual_next_action`（输出结构化下一步动作）
 - **文档处理**：Excel/PPT/Word/PDF（用预置脚本，见下方）
 
 ## 可用技能
@@ -264,9 +327,14 @@ JSON 格式：
 ### 查看收件箱
 写 Python 脚本用 `imaplib.IMAP4_SSL` 连接 IMAP 服务器读取邮件。
 
-### Windows 命令
+### 跨平台桌面执行规范（Windows/macOS/Linux）
 - `run_command` 默认工作目录是用户主目录
 - 脚本文件统一写到 `C:\\\\Users\\\\Public\\\\` 或 `%TEMP%\\\\`
+- `run_command` 必须是单条命令，禁止使用 `cmd /c`、`powershell -Command`、`python -c` 这类包裹/内联执行方式
+- 执行脚本时优先：`python C:\\\\Users\\\\Public\\\\xxx.py`（不要再拼接 shell 链式命令）
+- 目标管理任务的状态回写（phase/status/review）必须用 `goal_task_update` 工具，禁止通过 `run_command` 更新数据库/状态
+- 若任务需要真实桌面自动化，先调用 `get_platform_info` 判断系统，再用 `open_application` + `type_text` + `press_hotkey` 组合执行。
+- 桌面IM发消息优先使用 `send_desktop_message(channel, recipient, content)`（支持 feishu/wecom/dingtalk）；调用后必须 `capture_screen` + `analyze_screen` 做结果核验，再给结论。若核验不通过，继续重试或切换方案，不要直接宣称“已发送”。
 """
 
         # 添加用户信息上下文
@@ -293,13 +361,15 @@ JSON 格式：
     def _should_search(self, message: str) -> bool:
         """判断是否需要联网搜索"""
         import re
-        message_lower = message.lower()
+        message_lower = (message or "").lower()
 
-        # 中文关键词直接包含即可
+        # 默认保守：只有明确搜索意图才联网，减少工作台对话延迟。
+        aggressive = os.getenv("AUTO_WEB_SEARCH", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+        # 中文关键词：仅显式搜索词触发
         cn_keywords = [
             "搜索", "查一下", "查找", "搜一下", "找一下",
-            "最新", "今天", "最近", "当前",
-            "新闻", "热点", "热搜",
+            "联网搜索", "帮我搜", "帮我查", "上网查",
         ]
         for keyword in cn_keywords:
             if keyword in message_lower:
@@ -311,11 +381,12 @@ JSON 格式：
             if re.search(r'(?<![a-zA-Z\-])' + re.escape(keyword) + r'(?![a-zA-Z\-])', message_lower):
                 return True
 
-        # 模糊意图关键词（中文）
-        intent_keywords = ["怎么样", "是什么"]
-        for keyword in intent_keywords:
-            if keyword in message_lower:
-                return True
+        # 可选激进模式：允许“最新/热点”触发自动搜索。
+        if aggressive:
+            weak_keywords = ["最新", "今天", "最近", "当前", "新闻", "热点", "热搜"]
+            for keyword in weak_keywords:
+                if keyword in message_lower:
+                    return True
 
         return False
 
@@ -349,84 +420,382 @@ JSON 格式：
             query = message[:50]
         return query
 
+    @staticmethod
+    def _extract_desktop_message_intent(message: str) -> Optional[Dict[str, str]]:
+        """Detect desktop IM send-message intent and parse channel/recipient/content."""
+        text = (message or "").strip()
+        if not text:
+            return None
+        lower = text.lower()
+        channel = ""
+        if any(k in lower for k in ["飞书", "feishu", "lark"]):
+            channel = "feishu"
+        elif any(k in lower for k in ["企业微信", "wecom", "wxwork"]):
+            channel = "wecom"
+        elif any(k in lower for k in ["钉钉", "dingtalk"]):
+            channel = "dingtalk"
+
+        if not channel:
+            return None
+        if not any(k in text for k in ["发送", "发", "通知", "告诉"]) and not any(
+            k in lower for k in ["send", "message"]
+        ):
+            return None
+
+        recipient = ""
+        content = ""
+        patterns = [
+            r"(?:给|向)\s*([^\s，。,:：]{1,24})\s*(?:发送|发)\s*(?:飞书)?(?:消息|信息)?[：:]\s*(.+)$",
+            r"(?:在|用)?(?:飞书|feishu|lark).{0,8}(?:给|向)\s*([^\s，。,:：]{1,24}).{0,8}(?:发送|发).{0,8}[：:]\s*(.+)$",
+            r"(?:给|向)\s*([^\s，。,:：]{1,24}).{0,12}(?:发送|发).{0,8}(?:消息|信息)\s*[“\"']?(.+?)[”\"']?$",
+        ]
+        for pattern in patterns:
+            m = re.search(pattern, text, flags=re.IGNORECASE)
+            if m:
+                recipient = (m.group(1) or "").strip().strip("，,。")
+                content = (m.group(2) or "").strip().strip("“”\"'")
+                break
+
+        if not recipient:
+            m2 = re.search(r"(?:给|向)\s*([^\s，。,:：]{1,24})", text)
+            if m2:
+                recipient = (m2.group(1) or "").strip()
+        if not content:
+            m3 = re.search(r"(?:消息|内容|发送)\s*[：:]\s*(.+)$", text)
+            if m3:
+                content = (m3.group(1) or "").strip().strip("“”\"'")
+
+        if not recipient or not content:
+            return None
+        return {"channel": channel, "recipient": recipient, "content": content}
+
+    @staticmethod
+    def _is_delivery_verified(answer: str) -> bool:
+        text = (answer or "").strip().lower()
+        if not text:
+            return False
+        positive_tokens = ["已发送", "发送成功", "已发出", "sent", "message sent"]
+        negative_tokens = ["未发送", "未确认", "没有发送", "not sent", "未看到", "无法确认"]
+        if any(token in text for token in negative_tokens):
+            return False
+        return any(token in text for token in positive_tokens)
+
     def _get_or_create_session(self, session_id: str) -> List[Dict]:
         """获取或创建会话"""
         if session_id not in self.sessions:
             self.sessions[session_id] = []
         return self.sessions[session_id]
 
+    def _is_skill_tool(self, tool_name: str) -> bool:
+        """Whether a tool name is provided by installed skills."""
+        return self.skills_loader.get_tool(tool_name) is not None
+
+    def _resolve_preferred_skill_name(self, preferred_skill: Optional[str]) -> Optional[str]:
+        if not preferred_skill:
+            return None
+        candidate = preferred_skill.strip()
+        if not candidate:
+            return None
+        direct = self.skills_loader.get_skill(candidate)
+        if direct:
+            return direct.name
+        candidate_lower = candidate.lower()
+        for skill in self.skills_loader.skills:
+            if skill.name.lower() == candidate_lower:
+                return skill.name
+            if (skill.display_name or "").lower() == candidate_lower:
+                return skill.name
+        return None
+
+    def _resolve_matched_skills(
+        self,
+        message: str,
+        preferred_skill: Optional[str] = None,
+        force_only: bool = False,
+    ) -> List[str]:
+        matched = [] if force_only else list(self.skill_executor.detect_intent(message) or [])
+        preferred = self._resolve_preferred_skill_name(preferred_skill)
+        if preferred and preferred not in matched:
+            matched.insert(0, preferred)
+        return matched
+
+    @staticmethod
+    def _skill_fallback_hint(tool_name: str) -> str:
+        return (
+            f"技能工具 `{tool_name}` 执行失败。请改用内置桌面工具链继续完成："
+            "list_directory -> read_file/write_file -> run_command（必要时）。"
+        )
+
+    def _ensure_session_skill_snapshot(self, session_id: str) -> Dict:
+        """
+        Ensure session-level skills snapshot is up to date.
+        Inspired by OpenClaw's snapshot-per-session strategy.
+        """
+        changed = self.skills_loader.refresh_if_changed()
+        meta = self.skills_loader.get_snapshot_meta()
+        existing = self.session_skill_snapshots.get(session_id)
+        should_update = changed or not existing or existing.get("version") != meta["version"]
+        if should_update:
+            snapshot = {
+                "version": meta["version"],
+                "skills": [skill.name for skill in self.skills_loader.skills],
+                "updated_at": int(time.time() * 1000),
+            }
+            self.session_skill_snapshots[session_id] = snapshot
+            return {"snapshot": snapshot, "changed": True}
+        return {"snapshot": existing, "changed": False}
+
+    @staticmethod
+    def _estimate_session_chars(messages: List[Dict], user_message: str) -> int:
+        total = len(user_message or "")
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, str):
+                total += len(content)
+            elif isinstance(content, list):
+                total += len(json.dumps(content, ensure_ascii=False))
+            elif content is not None:
+                total += len(str(content))
+        return total
+
+    async def _run_pre_compaction_memory_flush(
+        self,
+        user_id: str,
+        session_id: str,
+        session_messages: List[Dict],
+        user_message: str,
+        estimated_chars: int,
+    ) -> Dict:
+        """
+        Best-effort pre-compaction memory flush.
+        Mirrors OpenClaw's "flush before compaction" idea in a lightweight form.
+        """
+        saved_count = 0
+        # Always save a compact marker so we can resume continuity after trimming history.
+        marker_content = (
+            f"会话接近压缩阈值，执行记忆刷新。"
+            f" session={session_id}, estimated_chars={estimated_chars}, user_message={user_message[:200]}"
+        )
+        await self.memory_manager.save_memory(
+            user_id=user_id,
+            content=marker_content,
+            memory_type="important_info",
+            metadata={
+                "source": "pre_compaction_flush",
+                "session_id": session_id,
+                "estimated_chars": estimated_chars,
+            },
+        )
+        saved_count += 1
+
+        # Try structured extraction from recent turns.
+        if self.memory_extractor.should_extract(user_message):
+            recent = session_messages[-6:]
+            context_lines: List[str] = []
+            for item in recent:
+                role = item.get("role", "unknown")
+                content = item.get("content", "")
+                if isinstance(content, str):
+                    context_lines.append(f"{role}: {content[:220]}")
+            context_lines.append(f"user: {user_message[:220]}")
+            conversation_context = "\n".join(context_lines)
+            extracted = await self.memory_extractor.extract_memories(
+                user_message=user_message,
+                conversation_context=conversation_context,
+            )
+            for mem in extracted[:3]:
+                await self.memory_manager.save_memory(
+                    user_id=user_id,
+                    content=mem["content"],
+                    memory_type=mem["memory_type"],
+                    metadata={
+                        "source": "pre_compaction_flush",
+                        "session_id": session_id,
+                        "importance": mem.get("importance", 7),
+                    },
+                )
+                saved_count += 1
+
+        return {"saved_count": saved_count, "estimated_chars": estimated_chars}
+
+    async def _build_memory_context(
+        self,
+        user_id: str,
+        message: str,
+    ) -> tuple[str, List[Dict], Dict[str, int]]:
+        """
+        Build memory context with priority memories + two-stage recall.
+        Inspired by OpenClaw's search->get memory flow.
+        """
+        memory_context = ""
+        memory_used: List[Dict] = []
+        seen_ids = set()
+        important_memories: List[Dict] = []
+        related_memories: List[Dict] = []
+
+        important_types = ["user_config", "user_info", "personal", "user_preference", "important_info"]
+        per_type_limit = max(1, int(os.getenv("MEMORY_IMPORTANT_PER_TYPE", "2")))
+        query_top_k = max(1, min(int(os.getenv("MEMORY_TOP_K", "5")), 20))
+        detail_limit = max(1, min(int(os.getenv("MEMORY_DETAIL_TOP_K", "4")), query_top_k))
+        context_char_limit = max(800, int(os.getenv("MEMORY_CONTEXT_CHAR_LIMIT", "2800")))
+
+        for mtype in important_types:
+            try:
+                type_mems = await self.memory_manager.list_memories(
+                    user_id=user_id,
+                    memory_type=mtype,
+                    limit=per_type_limit,
+                )
+                for mem in type_mems:
+                    if mem["id"] in seen_ids:
+                        continue
+                    seen_ids.add(mem["id"])
+                    important_memories.append(mem)
+            except Exception as e:
+                logger.warning(f"加载 {mtype} 记忆失败: {e}")
+
+        try:
+            snippets = await self.memory_manager.search_memory_snippets(
+                user_id=user_id,
+                query=message,
+                top_k=query_top_k,
+                use_hybrid=True,
+            )
+            for snippet in snippets[:detail_limit]:
+                memory_id = snippet.get("id")
+                if not memory_id or memory_id in seen_ids:
+                    continue
+                detail = await self.memory_manager.get_memory_detail(
+                    user_id=user_id,
+                    memory_id=memory_id,
+                )
+                if not detail:
+                    continue
+                seen_ids.add(memory_id)
+                detail["score"] = snippet.get("score")
+                related_memories.append(detail)
+        except Exception as e:
+            logger.warning(f"两段式记忆检索失败，回退到传统检索: {e}")
+            fallback = await self.memory_manager.search_memories(
+                user_id=user_id,
+                query=message,
+                top_k=detail_limit,
+                use_hybrid=True,
+            )
+            for mem in fallback:
+                if mem["id"] in seen_ids:
+                    continue
+                seen_ids.add(mem["id"])
+                related_memories.append(mem)
+
+        memories = [*important_memories, *related_memories]
+        if not memories:
+            return memory_context, memory_used, {"important": 0, "related": 0}
+
+        type_labels = {
+            "user_config": "[配置]",
+            "user_info": "[信息]",
+            "personal": "[个人]",
+            "user_preference": "[偏好]",
+            "important_info": "[重要]",
+        }
+
+        lines = ["相关记忆："]
+        current_chars = len(lines[0])
+        for i, mem in enumerate(memories, 1):
+            content = (mem.get("content") or "").strip()
+            if not content:
+                continue
+            label = type_labels.get(mem.get("memory_type", ""), "")
+            line = f"{i}. {label} {content}"
+            if current_chars + len(line) > context_char_limit:
+                lines.append("...（已省略部分记忆，避免上下文过长）")
+                break
+            lines.append(line)
+            current_chars += len(line)
+            memory_used.append({
+                "id": mem.get("id"),
+                "content": (content[:100] + "...") if len(content) > 100 else content,
+                "similarity": mem.get("final_score", mem.get("score", mem.get("similarity", 0))),
+            })
+
+        memory_context = "\n".join(lines) + "\n"
+        return memory_context, memory_used, {
+            "important": len(important_memories),
+            "related": len(related_memories),
+        }
+
     async def chat(
         self,
         user_id: str,
         message: str,
         session_id: str = "default",
-        use_memory: bool = True
+        use_memory: bool = True,
+        fast_mode: bool = False,
+        response_mode: str = "balanced",
+        preferred_skill: Optional[str] = None,
+        skill_strict: bool = False,
     ) -> Dict:
         """对话（非流式）"""
+        try:
+            self._ensure_session_skill_snapshot(session_id)
+        except Exception as e:
+            logger.warning(f"skills snapshot refresh failed: {e}")
 
         # 1. 检索相关记忆
         memory_context = ""
         memory_used = []
 
         if use_memory:
-            # 1a. 始终加载重要记忆（user_config, personal, user_preference, important_info）
-            important_memories = []
-            seen_ids = set()
-            for mtype in ["user_config", "personal", "user_preference", "important_info"]:
-                try:
-                    type_mems = await self.memory_manager.list_memories(
-                        user_id=user_id,
-                        memory_type=mtype,
-                        limit=5
-                    )
-                    for mem in type_mems:
-                        if mem["id"] not in seen_ids:
-                            seen_ids.add(mem["id"])
-                            important_memories.append(mem)
-                except Exception as e:
-                    logger.warning(f"加载 {mtype} 记忆失败: {e}")
-
-            # 1b. 混合搜索检索相关记忆
-            query_memories = await self.memory_manager.search_memories(
+            memory_context, memory_used, memory_stats = await self._build_memory_context(
                 user_id=user_id,
-                query=message,
-                top_k=int(os.getenv("MEMORY_TOP_K", 5)),
-                use_hybrid=True
+                message=message,
             )
-
-            # 1c. 合并：重要记忆优先
-            memories = list(important_memories)
-            for mem in (query_memories or []):
-                if mem["id"] not in seen_ids:
-                    seen_ids.add(mem["id"])
-                    memories.append(mem)
-
-            if memories:
-                memory_context = "相关记忆：\n"
-                for i, mem in enumerate(memories, 1):
-                    mem_type_label = {"user_config": "[配置]", "personal": "[个人]", "user_preference": "[偏好]", "important_info": "[重要]"}.get(mem.get("memory_type", ""), "")
-                    memory_context += f"{i}. {mem_type_label} {mem['content']}\n"
-                    memory_used.append({
-                        "id": mem["id"],
-                        "content": mem["content"][:100] + "...",
-                        "similarity": mem.get("final_score", mem.get("score", mem.get("similarity", 0)))
-                    })
-
-                logger.info(f"检索到 {len(memories)} 条记忆 (重要: {len(important_memories)}, 相关: {len(query_memories or [])})")
+            if memory_used:
+                logger.info(
+                    f"检索到 {len(memory_used)} 条记忆 (重要: {memory_stats.get('important', 0)}, "
+                    f"相关: {memory_stats.get('related', 0)})"
+                )
 
         # 2. 检测 Skill 意图并获取上下文
         skill_context = ""
-        matched_skills = self.skill_executor.detect_intent(message)
+        resolved_preferred = self._resolve_preferred_skill_name(preferred_skill)
+        if skill_strict and preferred_skill and not resolved_preferred:
+            return {
+                "message": f"未找到你指定的技能：{preferred_skill}。请先在技能页确认已安装后重试。",
+                "tool_calls": [],
+                "memory_used": memory_used,
+            }
+
+        matched_skills = self._resolve_matched_skills(
+            message,
+            preferred_skill=preferred_skill,
+            force_only=bool(skill_strict and resolved_preferred),
+        )
         if matched_skills:
             logger.info(f"🛠️ 检测到 Skill 意图: {matched_skills}")
             skill_context = self.skill_executor.get_combined_skill_context(matched_skills)
 
         # 3. 检测是否需要联网搜索
         search_context = ""
-        if self._should_search(message):
+        mode = (response_mode or "").strip().lower()
+        if mode not in {"fast", "balanced", "deep"}:
+            mode = "fast" if fast_mode else "balanced"
+        base_auto_search_results = int(os.getenv("AUTO_SEARCH_NUM_RESULTS", "5"))
+        auto_search_enabled = mode != "fast"
+        if mode == "deep":
+            auto_search_results = min(base_auto_search_results + 3, 10)
+        elif mode == "fast":
+            auto_search_results = min(3, base_auto_search_results)
+        else:
+            auto_search_results = base_auto_search_results
+        if auto_search_enabled and self._should_search(message):
             search_query = self._extract_search_query(message)
             logger.info(f"🔍 检测到搜索意图，开始联网搜索 (query='{search_query}')...")
-            search_response = await self.web_search.search(search_query, num_results=10)
+            search_response = await self.web_search.search(
+                search_query,
+                num_results=auto_search_results
+            )
             if search_response.success:
                 search_context = self.web_search.format_for_context(search_response)
                 logger.info(f"✅ 搜索完成，获取 {len(search_response.results)} 条结果")
@@ -565,6 +934,46 @@ JSON 格式：
             }
         })
 
+        # 内置工具：记忆搜索（两段式：先 search，再 get）
+        tools.append({
+            "name": "memory_search",
+            "description": "在长期记忆中搜索相关片段。用于回忆历史偏好、决策、上下文。返回摘要列表，不返回完整正文。",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "搜索查询词"
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "返回条数，默认5",
+                        "default": 5
+                    },
+                    "memory_type": {
+                        "type": "string",
+                        "description": "记忆类型过滤（可选）"
+                    }
+                },
+                "required": ["query"]
+            }
+        })
+
+        tools.append({
+            "name": "memory_get",
+            "description": "根据 memory_search 返回的 memory_id 获取完整记忆内容。",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "memory_id": {
+                        "type": "string",
+                        "description": "记忆ID"
+                    }
+                },
+                "required": ["memory_id"]
+            }
+        })
+
         # 内置工具：搜索社区技能（find-skills 的可执行工具）
         if self.skill_installer:
             tools.append({
@@ -608,10 +1017,278 @@ JSON 格式：
             }
         })
 
+        # 内置工具：目标任务状态更新（避免用 run_command 调状态）
+        if self.goal_manager:
+            tools.append({
+                "name": "goal_task_update",
+                "description": "更新已绑定目标任务的执行状态。任务状态回写必须优先使用本工具，禁止用 run_command 改写任务状态。",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": {
+                            "type": "integer",
+                            "description": "任务ID（可选；若省略则默认使用当前绑定任务ID）",
+                        },
+                        "phase": {
+                            "type": "string",
+                            "description": "执行阶段",
+                            "enum": ["plan", "do", "verify"],
+                        },
+                        "status": {
+                            "type": "string",
+                            "description": "执行状态",
+                            "enum": ["idle", "active", "blocked", "done"],
+                        },
+                        "note": {
+                            "type": "string",
+                            "description": "执行备注（可选）",
+                        },
+                        "prompt": {
+                            "type": "string",
+                            "description": "最后一次执行提示词（可选）",
+                        },
+                        "review_decision": {
+                            "type": "string",
+                            "description": "验收结果（可选）：accept / reject / pending",
+                        },
+                        "review_reason": {
+                            "type": "string",
+                            "description": "验收说明（可选）",
+                        },
+                    },
+                    "required": ["phase", "status"],
+                }
+            })
+
         # Desktop tools (executed via frontend Tauri bridge)
         tools.append({
+            "name": "get_platform_info",
+            "description": "获取用户电脑系统平台信息（windows/macos/linux 和架构）。低风险。适合在自动化前判断系统差异。",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        })
+
+        tools.append({
+            "name": "open_application",
+            "description": "打开本机应用（跨平台：Windows/macOS/Linux）。例如 Notepad、Calculator、TextEdit。需要用户授权。",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "app": {
+                        "type": "string",
+                        "description": "应用名称或可执行路径"
+                    },
+                    "args": {
+                        "type": "array",
+                        "description": "应用启动参数（可选）",
+                        "items": {"type": "string"}
+                    }
+                },
+                "required": ["app"]
+            }
+        })
+
+        tools.append({
+            "name": "type_text",
+            "description": "向当前前台应用输入文本。可选 target_app 先尝试激活目标应用。需要用户授权。",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "要输入的文本内容"
+                    },
+                    "target_app": {
+                        "type": "string",
+                        "description": "目标应用名称（可选）"
+                    }
+                },
+                "required": ["text"]
+            }
+        })
+
+        tools.append({
+            "name": "press_hotkey",
+            "description": "向前台应用发送快捷键组合（例如 Ctrl+S / Cmd+V）。可选 target_app 先激活。需要用户授权。",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "keys": {
+                        "type": "array",
+                        "description": "快捷键数组，如 ['ctrl','s'] 或 ['cmd','v']",
+                        "items": {"type": "string"}
+                    },
+                    "target_app": {
+                        "type": "string",
+                        "description": "目标应用名称（可选）"
+                    }
+                },
+                "required": ["keys"]
+            }
+        })
+
+        tools.append({
+            "name": "send_desktop_message",
+            "description": "通过桌面IM发送消息（确定性流程）：支持 feishu/wecom/dingtalk，自动打开应用、搜索联系人并发送消息。优先用于“给某人发消息”场景。需要用户授权。",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "channel": {
+                        "type": "string",
+                        "description": "消息通道：feishu | wecom | dingtalk"
+                    },
+                    "recipient": {
+                        "type": "string",
+                        "description": "联系人名称"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "消息正文"
+                    }
+                },
+                "required": ["channel", "recipient", "content"]
+            }
+        })
+
+        tools.append({
+            "name": "send_feishu_message",
+            "description": "通过飞书发送消息（确定性流程）：自动打开飞书、搜索联系人并发送消息。优先用于“给某人发消息”场景。需要用户授权。",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "recipient": {
+                        "type": "string",
+                        "description": "联系人名称"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "消息正文"
+                    }
+                },
+                "required": ["recipient", "content"]
+            }
+        })
+
+        tools.append({
+            "name": "capture_screen",
+            "description": "截取当前屏幕并返回图片路径。用于后续视觉分析。需要用户授权。",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "save_to": {
+                        "type": "string",
+                        "description": "截图保存路径（可选，建议 .png）",
+                    }
+                },
+                "required": []
+            }
+        })
+
+        tools.append({
+            "name": "mouse_move",
+            "description": "将鼠标移动到指定屏幕坐标。高风险，需要用户授权。",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "x": {
+                        "type": "integer",
+                        "description": "横坐标像素"
+                    },
+                    "y": {
+                        "type": "integer",
+                        "description": "纵坐标像素"
+                    }
+                },
+                "required": ["x", "y"]
+            }
+        })
+
+        tools.append({
+            "name": "mouse_click",
+            "description": "在屏幕坐标执行鼠标点击（left/right/middle）。高风险，需要用户授权。",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "x": {
+                        "type": "integer",
+                        "description": "横坐标像素"
+                    },
+                    "y": {
+                        "type": "integer",
+                        "description": "纵坐标像素"
+                    },
+                    "button": {
+                        "type": "string",
+                        "description": "left/right/middle，默认 left"
+                    }
+                },
+                "required": ["x", "y"]
+            }
+        })
+
+        tools.append({
+            "name": "mouse_scroll",
+            "description": "在当前鼠标位置执行滚轮滚动。正数向上，负数向下。高风险，需要用户授权。",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "amount": {
+                        "type": "integer",
+                        "description": "滚动量（建议 1-10）"
+                    }
+                },
+                "required": ["amount"]
+            }
+        })
+
+        tools.append({
+            "name": "analyze_screen",
+            "description": "用 MiniMax 视觉模型分析截图并给出可执行建议。建议先 capture_screen 再调用。",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "image_path": {
+                        "type": "string",
+                        "description": "截图文件绝对路径（png/jpg）"
+                    },
+                    "question": {
+                        "type": "string",
+                        "description": "想让视觉模型回答的问题，例如“下一步应该点哪里”"
+                    }
+                },
+                "required": ["image_path", "question"]
+            }
+        })
+
+        tools.append({
+            "name": "visual_next_action",
+            "description": "基于截图与目标，输出下一步桌面操作建议（结构化 JSON）。建议先 capture_screen 再调用。",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "image_path": {
+                        "type": "string",
+                        "description": "截图文件绝对路径（png/jpg）"
+                    },
+                    "goal": {
+                        "type": "string",
+                        "description": "当前步骤目标，例如“点击发送按钮并提交”"
+                    },
+                    "history": {
+                        "type": "string",
+                        "description": "可选：上一轮尝试与失败信息"
+                    }
+                },
+                "required": ["image_path", "goal"]
+            }
+        })
+
+        tools.append({
             "name": "run_command",
-            "description": "在用户电脑上执行终端命令。可以运行任何 shell 命令，如查看文件、安装软件包、执行脚本等。需要用户授权。",
+            "description": "在用户电脑上执行终端命令。适合查看信息、运行脚本、安装依赖等。不要用它删除文件/目录，删除请改用 delete_file。需要用户授权。",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -681,11 +1358,59 @@ JSON 格式：
             }
         })
 
+        tools.append({
+            "name": "get_file_info",
+            "description": "获取用户电脑上文件或目录的元信息（是否存在、大小、更新时间等）。需要用户授权。",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "文件或目录的绝对路径"
+                    }
+                },
+                "required": ["path"]
+            }
+        })
+
+        tools.append({
+            "name": "delete_file",
+            "description": "删除用户电脑上的文件或目录。删除目录时可设置 recursive=true。高风险操作，需要用户授权。",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "要删除的文件或目录绝对路径"
+                    },
+                    "recursive": {
+                        "type": "boolean",
+                        "description": "删除目录时是否递归删除（默认 false）",
+                        "default": False
+                    }
+                },
+                "required": ["path"]
+            }
+        })
+
         return tools
 
-    async def _execute_tool(self, user_id: str, tool_name: str, tool_input: Dict) -> Dict:
+    async def _execute_tool(
+        self,
+        user_id: str,
+        tool_name: str,
+        tool_input: Dict,
+        bound_goal_task_id: Optional[int] = None,
+    ) -> Dict:
         """执行工具调用 - 自动路由到对应 Skill"""
         logger.info(f"🔧 执行工具: {tool_name}")
+
+        if tool_name == "run_command":
+            command = str((tool_input or {}).get("command") or "")
+            translated = self._try_translate_task_updater_command(command)
+            if translated:
+                logger.info("↪️ 检测到任务状态更新脚本命令，已改走 goal_task_update 内置工具")
+                return await self._execute_goal_task_update(translated, bound_goal_task_id)
 
         # Desktop tools: return special marker for frontend bridging
         if tool_name in DESKTOP_TOOLS:
@@ -700,9 +1425,25 @@ JSON 格式：
         if tool_name == "web_search":
             return await self._execute_web_search(tool_input)
 
+        # 内置工具：视觉分析（MiniMax）
+        if tool_name == "analyze_screen":
+            return await self._execute_analyze_screen(tool_input)
+        if tool_name == "visual_next_action":
+            return await self._execute_visual_next_action(tool_input)
+
         # 内置工具：保存记忆
         if tool_name == "save_memory":
             return await self._execute_save_memory(user_id, tool_input)
+
+        # 内置工具：记忆检索（两段式）
+        if tool_name == "memory_search":
+            return await self._execute_memory_search(user_id, tool_input)
+        if tool_name == "memory_get":
+            return await self._execute_memory_get(user_id, tool_input)
+
+        # 内置工具：目标任务状态更新（优先走后端直连，避免 run_command）
+        if tool_name == "goal_task_update":
+            return await self._execute_goal_task_update(tool_input, bound_goal_task_id)
 
         # 内置工具：搜索社区技能（find_skills 或 find-skills 均路由到此）
         if tool_name in ("find_skills", "find-skills") and self.skill_installer:
@@ -734,6 +1475,59 @@ JSON 格式：
             }
 
         return {"success": False, "error": f"未找到工具: {tool_name}"}
+
+    async def _execute_tool_with_policy(
+        self,
+        user_id: str,
+        tool_name: str,
+        tool_input: Dict,
+        bound_goal_task_id: Optional[int] = None,
+    ) -> Dict:
+        """
+        Execute tool with Claude-like policy:
+        - skill tools: allow one transient retry
+        - skill tools: attach fallback hint on failure
+        """
+        max_attempts = self.skill_tool_retry_max if self._is_skill_tool(tool_name) else 1
+        attempt = 0
+        result: Dict = {"success": False, "error": "unknown"}
+
+        while attempt < max_attempts:
+            attempt += 1
+            result = await self._execute_tool(
+                user_id=user_id,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                bound_goal_task_id=bound_goal_task_id,
+            )
+            if result.get("success"):
+                if attempt > 1:
+                    result.setdefault("data", {})
+                    if isinstance(result["data"], dict):
+                        result["data"]["policy_retry_used"] = attempt - 1
+                return result
+
+            if not self._is_skill_tool(tool_name):
+                break
+            if attempt >= max_attempts:
+                break
+            if not is_transient_tool_error(result):
+                break
+
+            logger.warning(
+                f"🔁 技能工具重试: {tool_name} (attempt {attempt + 1}/{max_attempts})"
+            )
+            await asyncio.sleep(0.2 * attempt)
+
+        if self._is_skill_tool(tool_name) and not result.get("success", False):
+            result.setdefault("data", {})
+            if isinstance(result["data"], dict):
+                result["data"].setdefault("fallback_hint", self._skill_fallback_hint(tool_name))
+                if attempt > 1:
+                    result["data"]["policy_retry_used"] = attempt - 1
+            result["message"] = result.get("message") or self._skill_fallback_hint(tool_name)
+
+        return result
 
     @staticmethod
     def _normalize_mcp_tool_name(tool_name: str) -> str:
@@ -843,6 +1637,166 @@ JSON 格式：
             logger.error(f"联网搜索失败: {e}")
             return {"success": False, "error": str(e)}
 
+    @staticmethod
+    def _prepare_vision_image_payload(image_path: str) -> tuple[Path, str, str]:
+        file_path = Path(str(image_path or "").strip())
+        if not file_path.exists() or not file_path.is_file():
+            raise FileNotFoundError(f"截图不存在: {image_path}")
+
+        mime_type = mimetypes.guess_type(str(file_path))[0] or "image/png"
+        if not mime_type.startswith("image/"):
+            raise ValueError(f"不支持的图片类型: {mime_type}")
+
+        max_bytes = int(os.getenv("VISION_MAX_IMAGE_BYTES", str(8 * 1024 * 1024)))
+        size = file_path.stat().st_size
+        if size > max_bytes:
+            raise ValueError(f"图片过大: {size} bytes，超过限制 {max_bytes} bytes")
+
+        image_b64 = base64.b64encode(file_path.read_bytes()).decode("utf-8")
+        return file_path, mime_type, image_b64
+
+    async def _execute_analyze_screen(self, params: Dict) -> Dict:
+        """内置工具：调用 MiniMax 视觉模型分析截图。"""
+        image_path = str((params.get("image_path") or "")).strip()
+        question = str((params.get("question") or "")).strip()
+        if not image_path:
+            return {"success": False, "error": "image_path 不能为空"}
+        if not question:
+            return {"success": False, "error": "question 不能为空"}
+
+        try:
+            file_path, mime_type, image_b64 = self._prepare_vision_image_payload(image_path)
+            vision_model = os.getenv("VISION_MODEL_NAME", self.model)
+            vision_max_tokens = int(os.getenv("VISION_MAX_TOKENS", "1024"))
+
+            response = await self.async_client.messages.create(
+                model=vision_model,
+                max_tokens=vision_max_tokens,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": question},
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": mime_type,
+                                    "data": image_b64,
+                                },
+                            },
+                        ],
+                    }
+                ],
+            )
+
+            answer_parts = []
+            for block in getattr(response, "content", []) or []:
+                if hasattr(block, "type") and block.type == "text":
+                    answer_parts.append(getattr(block, "text", ""))
+            answer = "\n".join([part for part in answer_parts if part]).strip()
+            if not answer:
+                answer = "视觉模型未返回可读文本。"
+
+            return {
+                "success": True,
+                "message": "视觉分析完成",
+                "data": {
+                    "image_path": str(file_path),
+                    "model": vision_model,
+                    "answer": answer,
+                },
+            }
+        except Exception as e:
+            logger.error(f"视觉分析失败: {e}")
+            return {"success": False, "error": f"视觉分析失败: {e}"}
+
+    async def _execute_visual_next_action(self, params: Dict) -> Dict:
+        """内置工具：视觉下一步动作规划（结构化 JSON）。"""
+        image_path = str((params.get("image_path") or "")).strip()
+        goal = str((params.get("goal") or "")).strip()
+        history = str((params.get("history") or "")).strip()
+        if not image_path:
+            return {"success": False, "error": "image_path 不能为空"}
+        if not goal:
+            return {"success": False, "error": "goal 不能为空"}
+
+        try:
+            file_path, mime_type, image_b64 = self._prepare_vision_image_payload(image_path)
+            vision_model = os.getenv("VISION_MODEL_NAME", self.model)
+            vision_max_tokens = int(os.getenv("VISION_MAX_TOKENS", "1024"))
+            instruction = (
+                "你是桌面自动化视觉规划器。"
+                "请根据截图和目标，只输出一个 JSON 对象，不要输出其他文本。"
+                "JSON 字段：action, x, y, button, text, hotkey, reason, confidence。"
+                "action 取值仅允许：click, type, hotkey, scroll, wait, done。"
+                "若无法确定坐标，x/y 设为 null，并在 reason 解释。"
+            )
+            user_text = f"目标: {goal}\n历史: {history or '(无)'}"
+
+            response = await self.async_client.messages.create(
+                model=vision_model,
+                max_tokens=vision_max_tokens,
+                system=instruction,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": user_text},
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": mime_type,
+                                    "data": image_b64,
+                                },
+                            },
+                        ],
+                    }
+                ],
+            )
+            text_blocks = []
+            for block in getattr(response, "content", []) or []:
+                if getattr(block, "type", "") == "text":
+                    text_blocks.append(getattr(block, "text", ""))
+            raw_text = "\n".join([t for t in text_blocks if t]).strip()
+            if not raw_text:
+                return {"success": False, "error": "视觉规划未返回文本"}
+
+            parsed = None
+            try:
+                parsed = json.loads(raw_text)
+            except Exception:
+                match = re.search(r"\{[\s\S]*\}", raw_text)
+                if match:
+                    parsed = json.loads(match.group(0))
+            if not isinstance(parsed, dict):
+                return {"success": False, "error": f"视觉规划返回非JSON: {raw_text[:280]}"}
+
+            return {
+                "success": True,
+                "message": "视觉动作规划完成",
+                "data": {
+                    "image_path": str(file_path),
+                    "model": vision_model,
+                    "plan": parsed,
+                    "raw": raw_text[:800],
+                },
+            }
+        except Exception as e:
+            logger.error(f"视觉动作规划失败: {e}")
+            return {"success": False, "error": f"视觉动作规划失败: {e}"}
+
+    async def vision_next_action(self, image_path: str, goal: str, history: str = "") -> Dict:
+        """Public wrapper for visual next-action planning."""
+        return await self._execute_visual_next_action(
+            {
+                "image_path": image_path,
+                "goal": goal,
+                "history": history,
+            }
+        )
+
     async def _execute_save_memory(self, user_id: str, params: Dict) -> Dict:
         """内置工具：保存记忆"""
         content = params.get("content", "")
@@ -864,68 +1818,220 @@ JSON 格式：
             logger.error(f"保存记忆失败: {e}")
             return {"success": False, "error": str(e)}
 
+    async def _execute_memory_search(self, user_id: str, params: Dict) -> Dict:
+        """内置工具：两段式记忆检索（search）"""
+        query = (params.get("query") or "").strip()
+        if not query:
+            return {"success": False, "error": "query 不能为空"}
+        top_k = int(params.get("top_k") or 5)
+        memory_type = params.get("memory_type")
+        try:
+            snippets = await self.memory_manager.search_memory_snippets(
+                user_id=user_id,
+                query=query,
+                top_k=max(1, min(top_k, 20)),
+                memory_type=memory_type,
+                use_hybrid=True,
+            )
+            return {
+                "success": True,
+                "message": f"找到 {len(snippets)} 条相关记忆片段",
+                "data": {"snippets": snippets}
+            }
+        except Exception as e:
+            logger.error(f"memory_search 执行失败: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def _execute_memory_get(self, user_id: str, params: Dict) -> Dict:
+        """内置工具：两段式记忆检索（get）"""
+        memory_id = (params.get("memory_id") or "").strip()
+        if not memory_id:
+            return {"success": False, "error": "memory_id 不能为空"}
+        try:
+            memory = await self.memory_manager.get_memory_detail(user_id=user_id, memory_id=memory_id)
+            if not memory:
+                return {"success": False, "error": "memory_not_found"}
+            return {
+                "success": True,
+                "message": "获取记忆成功",
+                "data": {"memory": memory}
+            }
+        except Exception as e:
+            logger.error(f"memory_get 执行失败: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def _execute_goal_task_update(self, params: Dict, bound_goal_task_id: Optional[int]) -> Dict:
+        """内置工具：更新目标任务执行状态（后端直连）。"""
+        if not self.goal_manager:
+            return {"success": False, "error": "goal_manager_unavailable"}
+        try:
+            raw_task_id = params.get("task_id")
+            task_id = int(raw_task_id) if raw_task_id is not None else int(bound_goal_task_id or 0)
+            if task_id <= 0:
+                return {
+                    "success": False,
+                    "error": "task_id_missing",
+                    "message": "未提供任务ID，且当前会话没有绑定任务。",
+                }
+
+            phase = str(params.get("phase") or "").strip().lower()
+            status = str(params.get("status") or "").strip().lower()
+            phase = {"planning": "plan", "doing": "do", "verification": "verify"}.get(phase, phase)
+            status = {"completed": "done", "complete": "done", "in_progress": "active"}.get(status, status)
+            note = str(params.get("note") or "").strip()
+            prompt = str(params.get("prompt") or "").strip()
+
+            state = self.goal_manager.update_execution_phase(
+                task_id=task_id,
+                phase=phase,
+                status=status,
+                note=note,
+                prompt=prompt,
+            )
+            if not state:
+                return {
+                    "success": False,
+                    "error": "update_execution_phase_failed",
+                    "message": "执行阶段更新失败，请检查 phase/status 是否合法或任务是否存在。",
+                }
+
+            # 可选：同步验收状态
+            review_raw = str(params.get("review_decision") or "").strip().lower()
+            review_reason = str(params.get("review_reason") or "").strip()
+            review_result = None
+            if review_raw:
+                if review_raw in {"accept", "approved", "approve"}:
+                    review_result = self.goal_manager.review_task(
+                        task_id=task_id,
+                        decision="accept",
+                        reason=review_reason,
+                        reviewed_by="agent",
+                    )
+                elif review_raw in {"reject", "rejected"}:
+                    review_result = self.goal_manager.review_task(
+                        task_id=task_id,
+                        decision="reject",
+                        reason=review_reason,
+                        reviewed_by="agent",
+                    )
+                elif review_raw in {"pending", "none"}:
+                    review_result = True
+                else:
+                    review_result = False
+
+            data = {
+                "task_id": task_id,
+                "phase": state.get("phase"),
+                "status": state.get("status"),
+                "note": state.get("note"),
+                "last_prompt": state.get("last_prompt"),
+                "updated_at": state.get("updated_at"),
+            }
+            if review_result is not None:
+                data["review_updated"] = bool(review_result)
+                data["review_decision"] = review_raw
+
+            return {
+                "success": True,
+                "message": f"任务 #{task_id} 执行状态已更新",
+                "data": data,
+            }
+        except Exception as e:
+            logger.error(f"goal_task_update 执行失败: {e}", exc_info=True)
+            return {"success": False, "error": str(e)}
+
+    @staticmethod
+    def _try_translate_task_updater_command(command: str) -> Optional[Dict]:
+        """Translate legacy cks_task_updater script command into goal_task_update params."""
+        raw = (command or "").strip()
+        if not raw:
+            return None
+        if "task_updater.py" not in raw and "cks_task_updater.py" not in raw:
+            return None
+
+        def pick(name: str) -> Optional[str]:
+            pattern = rf"--{name}\s+((?:\"[^\"]*\")|(?:'[^']*')|(?:\S+))"
+            m = re.search(pattern, raw)
+            if not m:
+                return None
+            value = m.group(1).strip().strip('"').strip("'")
+            return value
+
+        mapped = {
+            "task_id": pick("task_id"),
+            "phase": pick("execution_phase"),
+            "status": pick("execution_state"),
+            "note": pick("execution_note"),
+            "prompt": pick("execution_prompt"),
+            "review_decision": pick("review_status"),
+            "review_reason": pick("review_note"),
+        }
+
+        if not mapped["phase"] or not mapped["status"]:
+            return None
+        if mapped["task_id"] is not None:
+            try:
+                mapped["task_id"] = int(str(mapped["task_id"]))
+            except Exception:
+                mapped["task_id"] = None
+
+        if mapped["review_decision"]:
+            review = str(mapped["review_decision"]).strip().lower()
+            mapped["review_decision"] = {
+                "approved": "accept",
+                "approve": "accept",
+                "accepted": "accept",
+                "rejected": "reject",
+            }.get(review, review)
+
+        return {k: v for k, v in mapped.items() if v not in (None, "")}
+
     async def chat_stream(
         self,
         user_id: str,
         message: str,
         session_id: str = "default",
-        use_memory: bool = True
+        use_memory: bool = True,
+        fast_mode: bool = False,
+        response_mode: str = "balanced",
+        goal_task_id: Optional[int] = None,
+        preferred_skill: Optional[str] = None,
+        skill_strict: bool = False,
     ) -> AsyncGenerator[str, None]:
         """对话（流式，支持 Tool Use）"""
+        mode = (response_mode or "").strip().lower()
+        if mode not in {"fast", "balanced", "deep"}:
+            mode = "fast" if fast_mode else "balanced"
+
+        # 0) Skills snapshot refresh (session-scoped)
+        try:
+            snapshot_state = self._ensure_session_skill_snapshot(session_id)
+            snapshot = snapshot_state.get("snapshot") or {}
+            yield json.dumps({
+                "type": "skills_snapshot",
+                "version": snapshot.get("version"),
+                "skills_count": len(snapshot.get("skills", [])),
+                "changed": snapshot_state.get("changed", False),
+                "fast_mode": mode == "fast",
+                "response_mode": mode,
+            })
+        except Exception as e:
+            logger.warning(f"skills snapshot refresh failed: {e}")
 
         # 1. 检索相关记忆
         memory_context = ""
         memory_used = []
 
         if use_memory:
-            # 1a. 始终加载重要记忆（user_config, personal, user_preference, important_info）
-            # 这些是用户的核心信息（邮箱、名字、偏好等），不受查询相关性影响
-            important_memories = []
-            seen_ids = set()
-            for mtype in ["user_config", "personal", "user_preference", "important_info"]:
-                try:
-                    type_mems = await self.memory_manager.list_memories(
-                        user_id=user_id,
-                        memory_type=mtype,
-                        limit=5
-                    )
-                    for mem in type_mems:
-                        if mem["id"] not in seen_ids:
-                            seen_ids.add(mem["id"])
-                            important_memories.append(mem)
-                except Exception as e:
-                    logger.warning(f"加载 {mtype} 记忆失败: {e}")
-
-            # 1b. 使用混合搜索检索与当前消息相关的记忆
-            query_memories = await self.memory_manager.search_memories(
+            memory_context, memory_used, memory_stats = await self._build_memory_context(
                 user_id=user_id,
-                query=message,
-                top_k=int(os.getenv("MEMORY_TOP_K", 5)),
-                use_hybrid=True
+                message=message,
             )
-
-            # 1c. 合并：重要记忆优先，再补充查询相关的记忆（去重）
-            memories = []
-            for mem in important_memories:
-                memories.append(mem)
-
-            for mem in (query_memories or []):
-                if mem["id"] not in seen_ids:
-                    seen_ids.add(mem["id"])
-                    memories.append(mem)
-
-            if memories:
-                memory_context = "相关记忆：\n"
-                for i, mem in enumerate(memories, 1):
-                    mem_type_label = {"user_config": "[配置]", "personal": "[个人]", "user_preference": "[偏好]", "important_info": "[重要]"}.get(mem.get("memory_type", ""), "")
-                    memory_context += f"{i}. {mem_type_label} {mem['content']}\n"
-                    memory_used.append({
-                        "id": mem["id"],
-                        "content": mem["content"][:100] + "...",
-                        "similarity": mem.get("final_score", mem.get("score", mem.get("similarity", 0)))
-                    })
-
-                logger.info(f"检索到 {len(memories)} 条记忆 (重要: {len(important_memories)}, 相关: {len(query_memories or [])})")
+            if memory_used:
+                logger.info(
+                    f"检索到 {len(memory_used)} 条记忆 (重要: {memory_stats.get('important', 0)}, "
+                    f"相关: {memory_stats.get('related', 0)})"
+                )
 
                 yield json.dumps({
                     "type": "memory",
@@ -934,7 +2040,25 @@ JSON 格式：
 
         # 2. 检测 Skill 意图并获取上下文
         skill_context = ""
-        matched_skills = self.skill_executor.detect_intent(message)
+        resolved_preferred = self._resolve_preferred_skill_name(preferred_skill)
+        if skill_strict and preferred_skill and not resolved_preferred:
+            yield json.dumps({
+                "type": "skill_policy",
+                "success": False,
+                "message": f"未找到你指定的技能：{preferred_skill}。请先在技能页确认已安装后重试。",
+            })
+            yield json.dumps({
+                "type": "text",
+                "content": f"未找到你指定的技能：{preferred_skill}。请先在技能页确认已安装后重试。"
+            })
+            yield json.dumps({"type": "done"})
+            return
+
+        matched_skills = self._resolve_matched_skills(
+            message,
+            preferred_skill=preferred_skill,
+            force_only=bool(skill_strict and resolved_preferred),
+        )
         use_tools = True  # Always enable tools (desktop tools are always available)
 
         if matched_skills:
@@ -955,9 +2079,34 @@ JSON 格式：
                 "skills": matched_skills
             })
 
+        desktop_message_intent = self._extract_desktop_message_intent(message)
+        if desktop_message_intent:
+            logger.info(
+                "📨 检测到桌面IM发送意图: channel=%s, recipient=%s",
+                desktop_message_intent.get("channel", ""),
+                desktop_message_intent.get("recipient", ""),
+            )
+            yield json.dumps({
+                "type": "tool_hint",
+                "tool": "send_desktop_message",
+                "message": (
+                    f"已识别{desktop_message_intent.get('channel', 'desktop')}消息任务，"
+                    f"将优先使用 send_desktop_message（联系人：{desktop_message_intent.get('recipient', '')}），并在发送后自动截图核验结果"
+                ),
+                "data": desktop_message_intent,
+            })
+
         # 3. 检测是否需要联网搜索
         search_context = ""
-        if self._should_search(message):
+        base_auto_search_results = int(os.getenv("AUTO_SEARCH_NUM_RESULTS", "5"))
+        auto_search_enabled = mode != "fast"
+        if mode == "deep":
+            auto_search_results = min(base_auto_search_results + 3, 10)
+        elif mode == "fast":
+            auto_search_results = min(3, base_auto_search_results)
+        else:
+            auto_search_results = base_auto_search_results
+        if auto_search_enabled and self._should_search(message):
             # 提取精简搜索关键词（去掉动作指令部分）
             search_query = self._extract_search_query(message)
             logger.info(f"🔍 检测到搜索意图，开始联网搜索 (query='{search_query}')...")
@@ -967,7 +2116,10 @@ JSON 格式：
                 "query": search_query
             })
 
-            search_response = await self.web_search.search(search_query, num_results=10)
+            search_response = await self.web_search.search(
+                search_query,
+                num_results=auto_search_results
+            )
             if search_response.success:
                 search_context = self.web_search.format_for_context(search_response)
                 logger.info(f"✅ 搜索完成，获取 {len(search_response.results)} 条结果")
@@ -998,14 +2150,193 @@ JSON 格式：
             "content": message
         })
 
+        # 4.5 预压缩记忆刷新（参考 OpenClaw：接近压缩阈值时先沉淀记忆）
+        try:
+            estimated_chars = self._estimate_session_chars(session_messages, message)
+            soft_threshold = max(2000, self.memory_flush_soft_chars)
+            current_cycle = estimated_chars // soft_threshold
+            last_cycle = self.session_memory_flush_state.get(session_id, -1)
+            if estimated_chars >= soft_threshold and current_cycle > last_cycle:
+                self.session_memory_flush_state[session_id] = current_cycle
+                yield json.dumps({
+                    "type": "memory_flush_start",
+                    "estimated_chars": estimated_chars,
+                    "threshold": soft_threshold,
+                })
+                flush_result = await self._run_pre_compaction_memory_flush(
+                    user_id=user_id,
+                    session_id=session_id,
+                    session_messages=session_messages,
+                    user_message=message,
+                    estimated_chars=estimated_chars,
+                )
+                yield json.dumps({
+                    "type": "memory_flush_done",
+                    "saved_count": flush_result.get("saved_count", 0),
+                    "estimated_chars": estimated_chars,
+                })
+        except Exception as e:
+            logger.warning(f"pre-compaction memory flush failed: {e}")
+            yield json.dumps({
+                "type": "memory_flush_error",
+                "error": str(e),
+            })
+
         # 5. 调用 API（支持 Tool Use）
         assistant_message = ""
         system_prompt = await self._get_system_prompt(user_id, memory_context, skill_context, search_context)
+        if desktop_message_intent:
+            system_prompt += (
+                "\n\n## 📮 桌面IM发送任务（强约束）\n"
+                f"用户本轮意图：通过「{desktop_message_intent.get('channel', '')}」给「{desktop_message_intent.get('recipient', '')}」发送消息，内容「{desktop_message_intent.get('content', '')}」。\n"
+                "你必须优先调用 `send_desktop_message`，不要拆分成 open_application/type_text/press_hotkey 多步组合。\n"
+                "发送动作之后必须调用 `capture_screen` 与 `analyze_screen` 核验是否进入目标会话且消息已发送；"
+                "若核验不通过，继续执行修复步骤后再汇报。"
+            )
 
         try:
-            if use_tools:
+            force_desktop_message_direct = os.getenv("FORCE_DESKTOP_MESSAGE_DIRECT", "1").strip().lower() in {"1", "true", "yes", "on"}
+            if desktop_message_intent and force_desktop_message_direct:
+                channel = str(desktop_message_intent.get("channel") or "feishu").strip()
+                recipient = str(desktop_message_intent.get("recipient") or "").strip()
+                content = str(desktop_message_intent.get("content") or "").strip()
+
+                # Step 1: deterministic desktop send tool
+                send_input = {"channel": channel, "recipient": recipient, "content": content}
+                send_start = time.time()
+                yield json.dumps({"type": "tool_start", "tool": "send_desktop_message", "input": send_input})
+                send_result = await self._execute_tool_with_policy(
+                    user_id=user_id,
+                    tool_name="send_desktop_message",
+                    tool_input=send_input,
+                    bound_goal_task_id=goal_task_id,
+                )
+                send_success = False
+                send_message = ""
+                if send_result.get("_desktop_tool"):
+                    request_id = str(uuid4())
+                    yield json.dumps({
+                        "type": "desktop_tool_request",
+                        "request_id": request_id,
+                        "tool": "send_desktop_message",
+                        "input": send_input,
+                    })
+                    desktop_send = await self._wait_for_desktop_result(request_id, timeout=120)
+                    send_success = bool(desktop_send.get("success"))
+                    send_message = desktop_send.get("content") or desktop_send.get("error", "")
+                    yield json.dumps({
+                        "type": "tool_result",
+                        "tool": "send_desktop_message",
+                        "success": send_success,
+                        "message": send_message,
+                        "data": desktop_send,
+                    })
+                else:
+                    send_success = bool(send_result.get("success"))
+                    send_message = send_result.get("message") or send_result.get("error", "")
+                    yield json.dumps({
+                        "type": "tool_result",
+                        "tool": "send_desktop_message",
+                        "success": send_success,
+                        "message": send_message,
+                        "data": send_result,
+                    })
+                logger.info(f"⏱️ 强制工具 send_desktop_message: {time.time()-send_start:.1f}s ({'✅' if send_success else '❌'})")
+
+                # Step 2: screenshot + vision verification
+                verify_text = "未执行核验。"
+                verify_ok = False
+                screenshot_path = ""
+                if send_success:
+                    cap_start = time.time()
+                    cap_input = {}
+                    yield json.dumps({"type": "tool_start", "tool": "capture_screen", "input": cap_input})
+                    cap_result = await self._execute_tool_with_policy(
+                        user_id=user_id,
+                        tool_name="capture_screen",
+                        tool_input=cap_input,
+                        bound_goal_task_id=goal_task_id,
+                    )
+                    cap_success = False
+                    if cap_result.get("_desktop_tool"):
+                        cap_req = str(uuid4())
+                        yield json.dumps({
+                            "type": "desktop_tool_request",
+                            "request_id": cap_req,
+                            "tool": "capture_screen",
+                            "input": cap_input,
+                        })
+                        desktop_cap = await self._wait_for_desktop_result(cap_req, timeout=120)
+                        cap_success = bool(desktop_cap.get("success"))
+                        cap_content = desktop_cap.get("content") or ""
+                        try:
+                            cap_data = json.loads(cap_content) if cap_content else {}
+                            screenshot_path = str(cap_data.get("path") or "")
+                        except Exception:
+                            screenshot_path = ""
+                        yield json.dumps({
+                            "type": "tool_result",
+                            "tool": "capture_screen",
+                            "success": cap_success,
+                            "message": desktop_cap.get("content") or desktop_cap.get("error", ""),
+                            "data": desktop_cap,
+                        })
+                    else:
+                        cap_success = bool(cap_result.get("success"))
+                    logger.info(f"⏱️ 强制工具 capture_screen: {time.time()-cap_start:.1f}s ({'✅' if cap_success else '❌'})")
+
+                    if cap_success and screenshot_path:
+                        question = (
+                            f"请判断当前桌面IM界面是否已向『{recipient}』发送消息『{content}』。"
+                            "只需给结论：已发送/未确认，并简述依据。"
+                        )
+                        analyze_input = {"image_path": screenshot_path, "question": question}
+                        yield json.dumps({"type": "tool_start", "tool": "analyze_screen", "input": analyze_input})
+                        analyze_result = await self._execute_tool_with_policy(
+                            user_id=user_id,
+                            tool_name="analyze_screen",
+                            tool_input=analyze_input,
+                            bound_goal_task_id=goal_task_id,
+                        )
+                        verify_ok = bool(analyze_result.get("success"))
+                        verify_answer = ""
+                        if verify_ok:
+                            verify_answer = str((analyze_result.get("data") or {}).get("answer") or "")
+                        verify_text = verify_answer or analyze_result.get("message") or analyze_result.get("error", "核验失败")
+                        if verify_ok:
+                            verify_ok = self._is_delivery_verified(verify_text)
+                        yield json.dumps({
+                            "type": "tool_result",
+                            "tool": "analyze_screen",
+                            "success": verify_ok,
+                            "message": verify_text,
+                            "data": analyze_result.get("data") or {},
+                        })
+                    else:
+                        verify_text = "截图核验失败，未拿到有效截图路径。"
+                else:
+                    verify_text = f"发送工具执行失败：{send_message or '未知错误'}"
+
+                assistant_message = (
+                    f"已执行桌面消息发送流程（通道：{channel}，联系人：{recipient}）。\n"
+                    f"发送执行：{'成功' if send_success else '失败'}。\n"
+                    f"视觉核验：{'已完成' if verify_ok else '未确认'}。\n"
+                    f"核验说明：{verify_text}\n"
+                    f"核验截图：{screenshot_path or '无'}"
+                )
+                yield json.dumps({"type": "text", "content": assistant_message})
+                yield json.dumps({"type": "done"})
+            elif use_tools:
                 # 使用非流式 API 处理工具调用
-                async for chunk in self._chat_with_tools(user_id, session_messages, system_prompt, session_id=session_id):
+                async for chunk in self._chat_with_tools(
+                    user_id,
+                    session_messages,
+                    system_prompt,
+                    session_id=session_id,
+                    goal_task_id=goal_task_id,
+                    fast_mode=(mode == "fast"),
+                    response_mode=mode,
+                ):
                     data = json.loads(chunk)
                     if data.get("type") == "text":
                         assistant_message += data.get("content", "")
@@ -1157,6 +2488,9 @@ JSON 格式：
         messages: List[Dict],
         system_prompt: str,
         session_id: str = "default",
+        goal_task_id: Optional[int] = None,
+        fast_mode: bool = False,
+        response_mode: str = "balanced",
     ) -> AsyncGenerator[str, None]:
         """带工具的对话（非流式处理工具调用，流式输出文本）"""
         import time
@@ -1164,12 +2498,30 @@ JSON 格式：
 
         tools = self._get_tools()
         current_messages = messages[-20:]
-        max_iterations = 50  # 最大工具调用轮数
-        max_same_tool_repeats = 3  # 同一工具+同参数连续调用超过该值将触发熔断
-        max_repetition_guard_triggers = 2  # 熔断触发超过该值后直接终止循环
+        mode = (response_mode or "").strip().lower()
+        if mode not in {"fast", "balanced", "deep"}:
+            mode = "fast" if fast_mode else "balanced"
+
+        max_iterations = int(os.getenv("MAX_TOOL_ITERATIONS", "16"))  # 最大工具调用轮数
+        if mode == "fast":
+            max_iterations = min(max_iterations, 10)
+        elif mode == "deep":
+            max_iterations = min(max_iterations + 4, 24)
+        max_same_tool_repeats = max(1, int(os.getenv("MAX_SAME_TOOL_REPEATS", "2")))
+        if mode == "fast":
+            max_same_tool_repeats = 1
+        elif mode == "deep":
+            max_same_tool_repeats = max(max_same_tool_repeats, 3)
+        max_repetition_guard_triggers = max(1, int(os.getenv("MAX_REPETITION_GUARD_TRIGGERS", "1")))
+        max_web_search_calls = max(1, int(os.getenv("MAX_WEB_SEARCH_CALLS_PER_TASK", "2")))
+        if mode == "fast":
+            max_web_search_calls = 1
+        elif mode == "deep":
+            max_web_search_calls = max_web_search_calls + 1
         last_tool_signature = None
         same_tool_repeat_count = 0
         repetition_guard_triggers = 0
+        web_search_calls = 0
 
         for iteration in range(max_iterations):
             iter_start = time.time()
@@ -1224,7 +2576,7 @@ JSON 格式：
                     tool_name = tool_block.name
                     tool_input = tool_block.input
                     tool_id = tool_block.id
-                    tool_signature = f"{tool_name}:{json.dumps(tool_input, ensure_ascii=False, sort_keys=True)}"
+                    tool_signature = make_tool_signature(tool_name, tool_input)
 
                     last_tool_signature, same_tool_repeat_count = update_repetition_state(
                         last_tool_signature,
@@ -1269,6 +2621,30 @@ JSON 格式：
                         })
                         continue
 
+                    if tool_name == "web_search" and web_search_calls >= max_web_search_calls:
+                        guard_error = (
+                            f"联网搜索预算已用尽（最多 {max_web_search_calls} 次），"
+                            "请基于已有结果继续整理答案。"
+                        )
+                        logger.warning(f"🛑 {guard_error}")
+                        yield json.dumps({
+                            "type": "tool_result",
+                            "tool": tool_name,
+                            "success": False,
+                            "message": guard_error,
+                            "data": {"error": guard_error, "budget_guard": True}
+                        })
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tool_id,
+                            "content": json.dumps({
+                                "success": False,
+                                "error": guard_error,
+                                "budget_guard": True
+                            })
+                        })
+                        continue
+
                     tool_start = time.time()
                     logger.info(f"🔧 调用工具: {tool_name} (输入: {json.dumps(tool_input, ensure_ascii=False)[:100]})")
 
@@ -1280,7 +2656,14 @@ JSON 格式：
                     })
 
                     # 执行工具
-                    result = await self._execute_tool(user_id, tool_name, tool_input)
+                    result = await self._execute_tool_with_policy(
+                        user_id=user_id,
+                        tool_name=tool_name,
+                        tool_input=tool_input,
+                        bound_goal_task_id=goal_task_id,
+                    )
+                    if tool_name == "web_search":
+                        web_search_calls += 1
 
                     # Desktop tool: bridge through frontend
                     if result.get("_desktop_tool"):
@@ -1418,4 +2801,6 @@ JSON 格式：
         """清除会话历史"""
         if session_id in self.sessions:
             del self.sessions[session_id]
+        if session_id in self.session_skill_snapshots:
+            del self.session_skill_snapshots[session_id]
             logger.info(f"清除会话: {session_id}")

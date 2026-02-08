@@ -1,5 +1,5 @@
-import { memo, useState } from 'react'
-import { Zap, Terminal, Loader2, CheckCircle2, XCircle, Shield, ChevronDown, ChevronUp } from 'lucide-react'
+import { memo, useMemo, useState } from 'react'
+import { CheckCircle2, ChevronDown, ChevronUp, Loader2, Shield, Terminal, Wrench, XCircle, Zap } from 'lucide-react'
 import type { ToolCallInfo } from '@/types/chat'
 
 export interface ToolCallCardProps {
@@ -42,7 +42,7 @@ const statusConfig = {
     iconClass: 'text-blue-400 animate-pulse',
     borderClass: 'border-blue-500/30',
     bgClass: 'bg-blue-500/5',
-    label: '等待审批...',
+    label: '等待批准...',
     labelClass: 'text-blue-400',
     dotClass: 'bg-blue-400',
     dotAnimate: true,
@@ -59,12 +59,29 @@ const statusConfig = {
   },
 } as const
 
+const kindLabel: Record<NonNullable<ToolCallInfo['kind']>, string> = {
+  skill: '技能执行',
+  system: '内置工具',
+  desktop: '桌面工具',
+  mcp: 'MCP 工具',
+  other: '工具调用',
+}
+
 export const ToolCallCard = memo(({ toolCall }: ToolCallCardProps) => {
   const [expanded, setExpanded] = useState(false)
   const config = statusConfig[toolCall.status]
   const StatusIcon = config.icon
-  const ToolIcon = toolCall.isDesktopTool ? Terminal : Zap
-  const hasDetails = (toolCall.input && Object.keys(toolCall.input).length > 0) || toolCall.message
+  const ToolIcon = toolCall.isDesktopTool ? Terminal : toolCall.kind === 'skill' ? Wrench : Zap
+
+  const detailMessage = useMemo(() => {
+    if (toolCall.message) return toolCall.message
+    if (toolCall.status !== 'error' || !toolCall.data) return ''
+    if (typeof toolCall.data.error === 'string' && toolCall.data.error) return toolCall.data.error
+    if (typeof toolCall.data.stderr === 'string' && toolCall.data.stderr) return toolCall.data.stderr
+    return ''
+  }, [toolCall.data, toolCall.message, toolCall.status])
+
+  const hasDetails = (toolCall.input && Object.keys(toolCall.input).length > 0) || Boolean(detailMessage)
 
   return (
     <div className={`rounded-lg border ${config.borderClass} ${config.bgClass} overflow-hidden transition-all`}>
@@ -81,19 +98,19 @@ export const ToolCallCard = memo(({ toolCall }: ToolCallCardProps) => {
 
         <ToolIcon className="h-3.5 w-3.5 text-neutral-400 flex-shrink-0" />
 
-        <span className="text-xs font-medium text-neutral-200 font-mono">
-          {toolCall.tool}
-        </span>
+        <span className="text-xs font-medium text-neutral-200 font-mono">{toolCall.tool}</span>
+
+        {toolCall.kind && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-300 border border-neutral-700">
+            {kindLabel[toolCall.kind]}
+          </span>
+        )}
 
         <div className="flex items-center gap-1 ml-auto">
           <StatusIcon className={`h-3.5 w-3.5 ${config.iconClass}`} />
-          <span className={`text-xs ${config.labelClass}`}>
-            {config.label}
-          </span>
+          <span className={`text-xs ${config.labelClass}`}>{config.label}</span>
           {hasDetails && (
-            expanded
-              ? <ChevronUp className="h-3 w-3 text-neutral-500 ml-1" />
-              : <ChevronDown className="h-3 w-3 text-neutral-500 ml-1" />
+            expanded ? <ChevronUp className="h-3 w-3 text-neutral-500 ml-1" /> : <ChevronDown className="h-3 w-3 text-neutral-500 ml-1" />
           )}
         </div>
       </div>
@@ -105,17 +122,13 @@ export const ToolCallCard = memo(({ toolCall }: ToolCallCardProps) => {
               {Object.entries(toolCall.input).map(([key, value]) => (
                 <div key={key} className="flex gap-2">
                   <span className="text-neutral-500 flex-shrink-0">{key}:</span>
-                  <span className="text-neutral-300 break-all">
-                    {typeof value === 'string' ? value : JSON.stringify(value)}
-                  </span>
+                  <span className="text-neutral-300 break-all">{typeof value === 'string' ? value : JSON.stringify(value)}</span>
                 </div>
               ))}
             </div>
           )}
-          {toolCall.message && (
-            <p className={`text-xs mt-1.5 ${toolCall.status === 'error' ? 'text-red-400' : 'text-neutral-500'}`}>
-              {toolCall.message}
-            </p>
+          {detailMessage && (
+            <p className={`text-xs mt-1.5 ${toolCall.status === 'error' ? 'text-red-400' : 'text-neutral-500'}`}>{detailMessage}</p>
           )}
         </div>
       )}

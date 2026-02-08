@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Agent SDK API Types
  */
 
@@ -8,7 +8,11 @@ export interface ChatRequest {
   message: string
   session_id?: string
   use_memory?: boolean
+  fast_mode?: boolean
+  response_mode?: 'fast' | 'balanced' | 'deep'
   goal_task_id?: number
+  preferred_skill?: string
+  skill_strict?: boolean
 }
 
 export interface ChatResponse {
@@ -33,6 +37,13 @@ export interface Memory {
   importance?: number
   access_count?: number
   metadata?: Record<string, any>
+  score?: number
+  final_score?: number
+  vector_score?: number
+  text_score?: number
+  source?: string
+  stale?: boolean
+  conflict_status?: string
 }
 
 export interface MemoryRequest {
@@ -47,10 +58,89 @@ export interface MemorySearchResult {
   memories: Memory[]
 }
 
+export interface MemorySnippet {
+  id: string
+  memory_type: string
+  importance: number
+  created_at: string
+  updated_at: string
+  score?: number
+  preview: string
+}
+
+export interface MemorySearchV2Result {
+  success: boolean
+  snippets?: MemorySnippet[]
+  total?: number
+  error?: string
+}
+
+export interface MemoryDetailResult {
+  success: boolean
+  memory?: Memory
+  error?: string
+}
+
 export interface MemoryListResult {
   success: boolean
   memories: Memory[]
   total: number
+}
+
+export interface MemoryCompactResult {
+  success: boolean
+  total_before?: number
+  deduplicated?: number
+  pruned_stale?: number
+  total_after?: number
+  dry_run?: boolean
+  error?: string
+}
+
+export interface MemoryConflictResolveResult {
+  success: boolean
+  updated?: number
+  action?: string
+  message?: string
+  error?: string
+}
+
+export interface MemoryMaintenanceReport {
+  total_memories: number
+  pending_conflicts: number
+  stale_memories: number
+  dedupe_candidates: number
+  stale_prune_candidates: number
+  dedupe_threshold: number
+  stale_days: number
+  generated_at: string
+}
+
+export interface MemoryMaintenanceReportResult {
+  success: boolean
+  report?: MemoryMaintenanceReport
+  error?: string
+}
+
+export interface MemoryConflictListResult {
+  success: boolean
+  conflicts?: Memory[]
+  total?: number
+  error?: string
+}
+
+export interface MemoryMaintenanceAutoRunResult {
+  success: boolean
+  ran?: boolean
+  reason?: string
+  interval_hours?: number
+  last_run_at?: string
+  next_run_at?: string
+  deduplicated?: number
+  pruned_stale?: number
+  total_before?: number
+  total_after?: number
+  error?: string
 }
 
 // Skill Types
@@ -65,6 +155,7 @@ export interface Skill {
   has_app: boolean
   is_hybrid: boolean
   has_tools?: boolean
+  tools?: string[]
   project_type?: string
   env_vars?: Array<{ name: string; required: boolean; description?: string }>
   enabled?: boolean  // Local UI state for enable/disable toggle
@@ -103,6 +194,129 @@ export interface SkillReadiness {
 export interface SkillsResult {
   success: boolean
   skills: Skill[]
+  snapshot?: {
+    version: number
+    skills_count: number
+    tools_count: number
+  }
+}
+
+export interface SkillsSnapshotResult {
+  success: boolean
+  changed?: boolean
+  snapshot?: {
+    version: number
+    skills_count: number
+    tools_count: number
+  }
+  error?: string
+}
+
+export interface ExecutionApprovalRecord {
+  id: string
+  source: string
+  organization_id?: string
+  tool_name: string
+  risk_level: 'low' | 'medium' | 'high' | string
+  status: 'pending' | 'approved' | 'denied' | 'expired' | string
+  payload?: Record<string, any>
+  created_at?: string
+  updated_at?: string
+  expires_at?: string | null
+  decided_by?: string | null
+  decision_note?: string | null
+}
+
+export interface ExecutionApprovalCreateResult {
+  success: boolean
+  record?: ExecutionApprovalRecord
+  error?: string
+}
+
+export interface ExecutionApprovalListResult {
+  success: boolean
+  items?: ExecutionApprovalRecord[]
+  total?: number
+  error?: string
+}
+
+export interface FeishuConfig {
+  app_id: string
+  app_secret: string
+  verification_token: string
+  encrypt_key: string
+  domain: string
+  auto_dispatch: boolean
+  enable_approval_card: boolean
+  allowed_senders: string
+  signature_tolerance_sec: number
+  replay_cache_size: number
+}
+
+export interface FeishuConfigResult {
+  success: boolean
+  config?: FeishuConfig
+  configured?: boolean
+  error?: string
+}
+
+export interface FeishuConfigTestResult {
+  success: boolean
+  token_ok?: boolean
+  probe?: {
+    success?: boolean
+    status_code?: number
+    error?: string
+    data?: any
+  }
+  error?: string
+}
+
+export interface FeishuDiagnosticCheck {
+  id: string
+  title: string
+  status: 'pass' | 'warn' | 'fail'
+  detail: string
+  action?: string
+}
+
+export interface FeishuDiagnoseResult {
+  success: boolean
+  configured?: boolean
+  probe_ok?: boolean
+  checks?: FeishuDiagnosticCheck[]
+  callback_urls?: {
+    events: string
+    inbound: string
+    outbound: string
+  }
+  error?: string
+}
+
+export interface ChannelTask {
+  id: number
+  channel: string
+  sender_id: string
+  chat_id: string
+  message: string
+  status: string
+  metadata?: Record<string, any>
+  result?: Record<string, any>
+  created_at?: string
+  updated_at?: string
+}
+
+export interface ChannelTaskResult {
+  success: boolean
+  task?: ChannelTask
+  error?: string
+}
+
+export interface ChannelTaskListResult {
+  success: boolean
+  tasks?: ChannelTask[]
+  total?: number
+  error?: string
 }
 
 export interface SkillDetailResult {
@@ -176,8 +390,18 @@ export interface GoalTask {
   title: string
   description: string
   assignee: string
+  department?: string
   status: string
   progress: number
+  review_status?: string
+  review_note?: string
+  reviewed_by?: string
+  reviewed_at?: string
+  handoff_status?: 'none' | 'pending' | 'claimed' | 'resolved' | string
+  handoff_owner?: string
+  handoff_note?: string
+  handoff_at?: string
+  handoff_resolved_at?: string
   created_at: string
   updated_at: string
 }
@@ -249,6 +473,59 @@ export interface GoalTaskListResult {
   success: boolean
   tasks?: GoalTaskListItem[]
   total?: number
+  error?: string
+}
+
+export interface GoalTaskExecutionState {
+  task_id: number
+  phase: 'plan' | 'do' | 'verify'
+  status: 'idle' | 'active' | 'blocked' | 'done'
+  note: string
+  last_prompt: string
+  resumed_count: number
+  created_at: string
+  updated_at: string
+}
+
+export interface GoalTaskExecutionResult {
+  success: boolean
+  data?: GoalTaskExecutionState
+  resume_prompt?: string
+  error?: string
+}
+
+export interface GoalsDashboardSummary {
+  total_tasks: number
+  pending_review: number
+  in_progress: number
+  accepted: number
+  rejected: number
+}
+
+export interface GoalsDashboardOwnerRow {
+  assignee: string
+  department?: string
+  departments?: string[]
+  total_tasks: number
+  in_progress: number
+  pending_review: number
+  accepted: number
+  rejected: number
+  avg_progress: number
+  completion_rate: number
+  latest_updated_at: string
+  next_task_id?: number | null
+  project_titles?: string[]
+  okr_titles?: string[]
+  kpi_titles?: string[]
+}
+
+export interface GoalsDashboardResult {
+  success: boolean
+  summary?: GoalsDashboardSummary
+  owners?: GoalsDashboardOwnerRow[]
+  total_owners?: number
+  total_tasks?: number
   error?: string
 }
 

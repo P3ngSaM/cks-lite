@@ -1,5 +1,5 @@
 import { memo } from 'react'
-import { Terminal, FileText, FolderOpen, Shield, AlertTriangle, CheckCheck } from 'lucide-react'
+import { AlertTriangle, CheckCheck, FileText, FolderOpen, Shield, Terminal } from 'lucide-react'
 import type { DesktopToolRequest } from '@/stores/permissionStore'
 
 interface PermissionApprovalDialogProps {
@@ -34,6 +34,8 @@ function getToolIcon(tool: string) {
   switch (tool) {
     case 'run_command':
       return Terminal
+    case 'delete_file':
+      return AlertTriangle
     case 'read_file':
     case 'write_file':
       return FileText
@@ -54,6 +56,8 @@ function getToolDetail(tool: string, input: Record<string, any>): string {
     case 'get_file_info':
     case 'list_directory':
       return input.path || ''
+    case 'delete_file':
+      return `${input.path || ''}${input.recursive ? '（递归删除）' : ''}`
     default:
       return JSON.stringify(input)
   }
@@ -97,9 +101,7 @@ export const PermissionApprovalDialog = memo(
             {request.risk_level === 'high' && (
               <div className="mt-3 flex items-start gap-2 rounded-lg bg-red-500/10 border border-red-500/20 px-3 py-2.5">
                 <AlertTriangle className="h-4 w-4 text-red-400 flex-shrink-0 mt-0.5" />
-                <p className="text-xs text-red-400">
-                  此操作可能修改或删除文件，请确认后再批准。
-                </p>
+                <p className="text-xs text-red-400">该操作可能修改或删除文件，请确认后再批准。</p>
               </div>
             )}
           </div>

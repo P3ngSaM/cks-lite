@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Message } from './Message'
 import type { Message as MessageType } from '@/types/chat'
 
@@ -10,11 +10,20 @@ export interface MessageListProps {
 export const MessageList = ({ messages, isLoading }: MessageListProps) => {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
+  const [autoScrollEnabled, setAutoScrollEnabled] = useState(true)
 
-  // Auto-scroll to bottom when new messages arrive
+  // Auto-scroll only when user stays near the bottom.
   useEffect(() => {
+    if (!autoScrollEnabled) return
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+  }, [messages, autoScrollEnabled])
+
+  const handleScroll = () => {
+    const container = containerRef.current
+    if (!container) return
+    const distanceToBottom = container.scrollHeight - container.scrollTop - container.clientHeight
+    setAutoScrollEnabled(distanceToBottom < 80)
+  }
 
   if (messages.length === 0 && !isLoading) {
     return (
@@ -39,6 +48,7 @@ export const MessageList = ({ messages, isLoading }: MessageListProps) => {
   return (
     <div
       ref={containerRef}
+      onScroll={handleScroll}
       className="h-full overflow-y-auto px-6 py-8"
     >
       <div className="max-w-4xl mx-auto space-y-6">

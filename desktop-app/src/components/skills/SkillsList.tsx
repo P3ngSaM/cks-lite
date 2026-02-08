@@ -10,6 +10,9 @@ export interface SkillsListProps {
   onViewContext?: (skillName: string) => void
   onUninstall?: (skillName: string) => void
   onRunTest?: (skillName: string) => void
+  onRunInWorkbench?: (skillName: string) => void
+  onEditAlias?: (skillName: string) => void
+  onRunExample?: (skillName: string) => void
 }
 
 const categoryLabelMap: Record<string, string> = {
@@ -32,6 +35,9 @@ export const SkillsList = ({
   onViewContext,
   onUninstall,
   onRunTest,
+  onRunInWorkbench,
+  onEditAlias,
+  onRunExample,
 }: SkillsListProps) => {
   if (isLoading) {
     return (
@@ -89,6 +95,9 @@ export const SkillsList = ({
           onViewContext={onViewContext}
           onUninstall={onUninstall}
           onRunTest={onRunTest}
+          onRunInWorkbench={onRunInWorkbench}
+          onEditAlias={onEditAlias}
+          onRunExample={onRunExample}
         />
       ))}
     </div>

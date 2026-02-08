@@ -1,0 +1,106 @@
+{
+  "name": "demo-office-assistant",
+  "displayName": "Demo Office Assistant",
+  "description": "Demo skill for desktop organization, document summarization, and PPT+email drafting.",
+  "category": "productivity",
+  "triggerKeywords": [
+    "ppt",
+    "邮箱",
+    "email",
+    "桌面整理",
+    "文件整理",
+    "文档总结",
+    "录屏演示"
+  ],
+  "tags": [
+    "demo",
+    "office",
+    "productivity"
+  ],
+  "tools": [
+    {
+      "name": "demo_prepare_ppt_and_email",
+      "description": "Generate a PPT outline and an email draft for a given topic.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "topic": {
+            "type": "string",
+            "description": "PPT topic"
+          },
+          "audience": {
+            "type": "string",
+            "description": "Target audience"
+          },
+          "recipient": {
+            "type": "string",
+            "description": "Email recipient"
+          },
+          "output_dir": {
+            "type": "string",
+            "description": "Output folder path"
+          }
+        },
+        "required": [
+          "topic"
+        ]
+      },
+      "entrypoint": "app.main:DemoOfficeAssistant",
+      "method": "prepare_ppt_and_email"
+    },
+    {
+      "name": "demo_organize_files",
+      "description": "Organize files in a folder by type and generate a report.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "source_dir": {
+            "type": "string",
+            "description": "Folder to organize"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "If true, do not move files",
+            "default": true
+          },
+          "output_report": {
+            "type": "string",
+            "description": "Report path"
+          }
+        },
+        "required": [
+          "source_dir"
+        ]
+      },
+      "entrypoint": "app.main:DemoOfficeAssistant",
+      "method": "organize_files"
+    },
+    {
+      "name": "demo_summarize_folder",
+      "description": "Read text-like files in a folder and produce a summary document.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "source_dir": {
+            "type": "string",
+            "description": "Folder to read"
+          },
+          "output_file": {
+            "type": "string",
+            "description": "Summary output path"
+          },
+          "max_chars_per_file": {
+            "type": "integer",
+            "description": "Chars read per file",
+            "default": 3000
+          }
+        },
+        "required": [
+          "source_dir"
+        ]
+      },
+      "entrypoint": "app.main:DemoOfficeAssistant",
+      "method": "summarize_folder"
+    }
+  ]
+}

@@ -1,13 +1,13 @@
-import { memo, useState, useMemo } from 'react'
+import { memo, useMemo, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { User, AlertCircle, Search, ChevronDown, ChevronUp, ExternalLink, Loader2 } from 'lucide-react'
+import { AlertCircle, ChevronDown, ChevronUp, ExternalLink, Loader2, Search, User } from 'lucide-react'
 import { cn } from '@/utils/cn'
 import { LoadingDots } from '@/components/ui'
-import { ToolCallCard } from './ToolCallCard'
-import { SkillRecommendationList } from './SkillRecommendationList'
-import { useUserStore, useAuthStore } from '@/stores'
+import { useAuthStore, useUserStore } from '@/stores'
 import type { Message as MessageType } from '@/types/chat'
+import { SkillRecommendationList } from './SkillRecommendationList'
+import { ToolCallCard } from './ToolCallCard'
 
 export interface MessageProps {
   message: MessageType
@@ -21,8 +21,8 @@ export const Message = memo(({ message }: MessageProps) => {
   const authUser = useAuthStore((state) => state.user)
   const [searchExpanded, setSearchExpanded] = useState(false)
 
-  const hasSearchResults = message.searchResults && message.searchResults.length > 0
-  const hasToolCalls = message.toolCalls && message.toolCalls.length > 0
+  const hasSearchResults = Boolean(message.searchResults && message.searchResults.length > 0)
+  const hasToolCalls = Boolean(message.toolCalls && message.toolCalls.length > 0)
 
   const cleanContent = useMemo(() => {
     if (!message.content) return ''
@@ -68,28 +68,28 @@ export const Message = memo(({ message }: MessageProps) => {
               {message.isSearching ? (
                 <div className="inline-flex items-center gap-2 px-3 py-1.5 bg-blue-500/10 border border-blue-500/20 rounded-lg">
                   <Loader2 className="h-3.5 w-3.5 text-blue-400 animate-spin" />
-                  <span className="text-xs text-blue-400">正在联网搜索...</span>
+                  <span className="text-xs text-blue-400">正在联网搜索…</span>
                 </div>
-              ) : hasSearchResults && (
+              ) : hasSearchResults ? (
                 <button
                   onClick={() => setSearchExpanded(!searchExpanded)}
                   className="inline-flex items-center gap-2 px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 rounded-lg transition-colors cursor-pointer"
                 >
                   <Search className="h-3.5 w-3.5 text-blue-400" />
-                  <span className="text-xs text-neutral-300">已搜索到 {message.searchResults!.length} 条结果</span>
+                  <span className="text-xs text-neutral-300">已检索到 {message.searchResults!.length} 条结果</span>
                   {searchExpanded ? (
                     <ChevronUp className="h-3.5 w-3.5 text-neutral-500" />
                   ) : (
                     <ChevronDown className="h-3.5 w-3.5 text-neutral-500" />
                   )}
                 </button>
-              )}
+              ) : null}
 
               {searchExpanded && hasSearchResults && (
                 <div className="mt-2 p-2 bg-neutral-900 border border-neutral-800 rounded-lg space-y-2 max-h-64 overflow-y-auto">
                   {message.searchResults!.map((result, index) => (
                     <a
-                      key={index}
+                      key={`${result.url}-${index}`}
                       href={result.url}
                       target="_blank"
                       rel="noopener noreferrer"
@@ -119,7 +119,7 @@ export const Message = memo(({ message }: MessageProps) => {
 
           {!isUser && hasToolCalls && (() => {
             const skillData = message.toolCalls?.find(
-              tc => (tc.tool === 'find_skills' || tc.tool === 'find-skills') && tc.data?.skills?.length > 0
+              (tc) => (tc.tool === 'find_skills' || tc.tool === 'find-skills') && tc.data?.skills?.length > 0
             )
             return skillData ? (
               <div className="mb-2">
@@ -154,9 +154,7 @@ export const Message = memo(({ message }: MessageProps) => {
                   style={{ fontSize: '14px', lineHeight: '1.6' }}
                 >
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{cleanContent}</ReactMarkdown>
-                  {isSending && cleanContent && (
-                    <span className="inline-block w-2 h-4 bg-white/60 animate-pulse ml-0.5" />
-                  )}
+                  {isSending && cleanContent && <span className="inline-block w-2 h-4 bg-white/60 animate-pulse ml-0.5" />}
                 </div>
               ) : null}
             </div>
@@ -167,7 +165,7 @@ export const Message = memo(({ message }: MessageProps) => {
               hour: '2-digit',
               minute: '2-digit',
             })}
-            {isSending && ' · 发送中...'}
+            {isSending && ' · 生成中…'}
           </div>
         </div>
       </div>

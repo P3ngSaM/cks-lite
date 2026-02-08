@@ -2,6 +2,7 @@ import { create } from 'zustand'
 
 export interface DesktopToolRequest {
   id: string
+  approval_request_id?: string
   tool: string
   input: Record<string, any>
   description: string

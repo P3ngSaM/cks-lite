@@ -16,6 +16,8 @@ from datetime import datetime
 from typing import List, Dict, Optional
 import re
 import logging
+import json
+import shutil
 
 logger = logging.getLogger(__name__)
 
@@ -43,10 +45,12 @@ class MarkdownMemory:
         self.workspace_dir = Path(workspace_dir)
         self.memory_file = self.workspace_dir / "MEMORY.md"
         self.daily_dir = self.workspace_dir / "memory"
+        self.archive_dir = self.daily_dir / "archive"
 
         # 确保目录存在
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
         self.daily_dir.mkdir(parents=True, exist_ok=True)
+        self.archive_dir.mkdir(parents=True, exist_ok=True)
 
         # 确保 MEMORY.md 存在
         if not self.memory_file.exists():
@@ -329,11 +333,47 @@ class MarkdownMemory:
                 # 文件名不符合日期格式，跳过
                 continue
 
-        # 压缩或删除
-        # TODO: 实现压缩逻辑（例如移动到 archive/ 目录）
+        moved_logs: List[Dict] = []
+        for log_file in sorted(old_logs):
+            try:
+                file_date = datetime.strptime(log_file.stem, "%Y-%m-%d")
+                month_bucket = file_date.strftime("%Y-%m")
+            except ValueError:
+                month_bucket = "unknown"
 
-        logger.info(f"压缩日志: 找到 {len(old_logs)} 个旧文件")
-        return old_logs
+            target_dir = self.archive_dir / month_bucket
+            target_dir.mkdir(parents=True, exist_ok=True)
+
+            target_path = target_dir / log_file.name
+            if target_path.exists():
+                # 避免覆盖同名文件
+                target_path = target_dir / f"{log_file.stem}_{int(datetime.now().timestamp())}.md"
+
+            size = 0
+            try:
+                size = log_file.stat().st_size
+            except Exception:
+                pass
+
+            shutil.move(str(log_file), str(target_path))
+            moved_logs.append(
+                {
+                    "date": log_file.stem,
+                    "from": str(log_file),
+                    "to": str(target_path),
+                    "size": size,
+                }
+            )
+
+        if moved_logs:
+            index_file = self.archive_dir / "index.jsonl"
+            with index_file.open("a", encoding="utf-8") as f:
+                for item in moved_logs:
+                    record = {"archived_at": datetime.now().isoformat(), **item}
+                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+        logger.info(f"压缩日志: 找到 {len(old_logs)} 个旧文件, 已归档 {len(moved_logs)} 个")
+        return moved_logs
 
     def export_to_json(self) -> Dict:
         """

@@ -15,7 +15,11 @@ export interface ToolCallInfo {
   message?: string
   data?: Record<string, any>
   requestId?: string
+  startedAt?: number
+  endedAt?: number
+  durationMs?: number
   isDesktopTool?: boolean
+  kind?: 'skill' | 'system' | 'desktop' | 'mcp' | 'other'
 }
 
 export interface Message {
@@ -37,6 +41,15 @@ export interface Session {
   title: string
   messages: Message[]
   createdAt: number
+  updatedAt: number
+}
+
+export type ExecutionPhase = 'plan' | 'do' | 'verify'
+
+export interface ExecutionFlowState {
+  taskId: number | null
+  phase: ExecutionPhase
+  note: string
   updatedAt: number
 }
 

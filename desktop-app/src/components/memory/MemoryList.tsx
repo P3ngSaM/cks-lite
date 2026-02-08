@@ -1,19 +1,28 @@
+﻿import { Brain } from 'lucide-react'
 import { MemoryCard } from './MemoryCard'
-import { Brain } from 'lucide-react'
 import type { Memory } from '@/types/agent'
 
 export interface MemoryListProps {
   memories: Memory[]
   isLoading?: boolean
   onDelete?: (id: string) => void
+  onResolveConflict?: (id: string) => void
   searchQuery?: string
+  showScoreDetails?: boolean
 }
 
-export const MemoryList = ({ memories, isLoading, onDelete, searchQuery }: MemoryListProps) => {
+export const MemoryList = ({
+  memories,
+  isLoading,
+  onDelete,
+  onResolveConflict,
+  searchQuery,
+  showScoreDetails = false,
+}: MemoryListProps) => {
   if (isLoading) {
     return (
       <div className="flex justify-center py-12">
-        <div className="text-neutral-500 text-sm">加载记忆中...</div>
+        <div className="text-neutral-500 text-sm">正在加载记忆...</div>
       </div>
     )
   }
@@ -29,9 +38,7 @@ export const MemoryList = ({ memories, isLoading, onDelete, searchQuery }: Memor
             {searchQuery ? '未找到相关记忆' : '暂无记忆'}
           </h3>
           <p className="text-sm text-neutral-500">
-            {searchQuery
-              ? '尝试使用不同的关键词搜索'
-              : '在对话中产生的重要信息会自动保存为记忆'}
+            {searchQuery ? '可以换个关键词继续搜索。' : '对话中产生的重要信息会自动沉淀为记忆。'}
           </p>
         </div>
       </div>
@@ -45,7 +52,9 @@ export const MemoryList = ({ memories, isLoading, onDelete, searchQuery }: Memor
           key={memory.id}
           memory={memory}
           onDelete={onDelete}
+          onResolveConflict={onResolveConflict}
           highlight={searchQuery}
+          showScoreDetails={showScoreDetails}
         />
       ))}
     </div>

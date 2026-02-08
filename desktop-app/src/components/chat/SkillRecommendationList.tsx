@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Loader2, CheckCircle2, Download } from 'lucide-react'
+import { CheckCircle2, Download, Loader2 } from 'lucide-react'
 import { AgentService } from '@/services/agentService'
 
 interface SkillRecommendation {
@@ -80,7 +80,7 @@ export const SkillRecommendationList = ({ skills }: SkillRecommendationListProps
                 {status === 'installing' && (
                   <span className="inline-flex items-center gap-1 px-2.5 py-1 text-xs text-neutral-400">
                     <Loader2 className="h-3 w-3 animate-spin" />
-                    安装中
+                    安装中…
                   </span>
                 )}
                 {status === 'installed' && (

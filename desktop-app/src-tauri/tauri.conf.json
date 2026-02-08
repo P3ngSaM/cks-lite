@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "identifier": "com.cks.lite",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
   "bundle": {
@@ -32,7 +32,9 @@
       "providerShortName": null,
       "signingIdentity": null
     },
-    "resources": [],
+    "resources": [
+      "../../agent-sdk"
+    ],
     "externalBin": [],
     "copyright": "Copyright © 2026 CKS Team",
     "category": "Productivity",

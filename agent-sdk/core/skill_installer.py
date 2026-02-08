@@ -8,8 +8,9 @@ import shutil
 import tarfile
 import tempfile
 import re
+import zipfile
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 from datetime import datetime
 import logging
 import httpx
@@ -46,6 +47,19 @@ class SkillInstaller:
     def get_installed_skills(self) -> Dict:
         return dict(self._manifest)
 
+    @staticmethod
+    def _normalize_skill_name(name: str) -> str:
+        value = re.sub(r"[^a-zA-Z0-9_-]+", "-", (name or "").strip()).strip("-_").lower()
+        return value or "custom-skill"
+
+    @staticmethod
+    def _find_skill_root(base_dir: Path) -> Optional[Path]:
+        if (base_dir / "SKILL.md").exists():
+            return base_dir
+        for path in base_dir.rglob("SKILL.md"):
+            return path.parent
+        return None
+
     # ── 引用解析 ─────────────────────────────────────────────
 
     @staticmethod
@@ -60,6 +74,9 @@ class SkillInstaller:
         - npx @anthropic-ai/claude-code --skill https://github.com/owner/repo --skill skill-name
         """
         ref = ref.strip().rstrip("/")
+        # 容错：去掉常见前导符号（如“: ref”、“- ref”）
+        ref = re.sub(r"^[\s:：>•\-*`]+", "", ref)
+        ref = ref.strip().strip("`'\"()[]{}").rstrip("/")
 
         # 去掉 npx 命令前缀（用户可能直接粘贴 skills.sh 的安装命令）
         npx_match = re.match(r"npx\s+\S+\s+", ref)
@@ -86,8 +103,21 @@ class SkillInstaller:
                     skill_name_from_flag = seg
             ref = repo_ref or ref
         ref = ref.strip().rstrip("/")
+        # ????????????? ": ref"?"- ref"?"? ref"?
+        ref = re.sub(r"^[^A-Za-z0-9h]+", "", ref)
+        ref = ref.strip().strip("`'\"()[]{}").rstrip("/")
 
-        # URL 格式（repo 名不含空格）
+        # ???????????????? GitHub ??
+        if "github.com/" in ref and not ref.startswith("http"):
+            m = re.search(r"(https?://github\.com/[^\s]+)", ref)
+            if m:
+                ref = m.group(1).rstrip("/")
+        elif not ref.startswith("http"):
+            m = re.search(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[^\s]+)?)", ref)
+            if m:
+                ref = m.group(1).rstrip("/")
+
+        # URL ???repo ??????
         url_match = re.match(
             r"https?://github\.com/([^/\s]+)/([^/\s]+)(?:/tree/([^/\s]+)(?:/(.+))?)?",
             ref,
@@ -198,25 +228,59 @@ class SkillInstaller:
         tmp_dir = Path(tempfile.mkdtemp(prefix="skill_install_"))
 
         async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+            repo_meta = await self._get_repo_meta(client, owner, repo)
+            if not repo_meta:
+                raise Exception(
+                    f"仓库不存在或无访问权限: {owner}/{repo}（GitHub 返回 404）"
+                )
+            default_branch = str(repo_meta.get("default_branch") or "main").strip() or "main"
+            branch_candidates = []
+            for item in [branch, default_branch, "main", "master"]:
+                item = (item or "").strip()
+                if item and item not in branch_candidates:
+                    branch_candidates.append(item)
+
             if path:
                 # 有路径：用 Contents API 递归下载目录
                 # 尝试直接路径，若 404 则尝试常见前缀
-                resolved_path = await self._resolve_skill_path(
-                    client, owner, repo, path, branch
-                )
+                resolved_path = None
+                resolved_branch = None
+                for branch_item in branch_candidates:
+                    resolved_path = await self._resolve_skill_path(
+                        client, owner, repo, path, branch_item
+                    )
+                    if resolved_path:
+                        resolved_branch = branch_item
+                        break
                 if not resolved_path:
                     raise Exception(
                         f"在仓库 {owner}/{repo} 中未找到技能 '{path}'，"
-                        f"已尝试路径: {path}, skills/{path}"
+                        f"已尝试分支: {', '.join(branch_candidates)}；路径: {path}, skills/{path}"
                     )
                 await self._download_directory(
-                    client, owner, repo, resolved_path, branch, tmp_dir
+                    client, owner, repo, resolved_path, resolved_branch or branch, tmp_dir
                 )
             else:
                 # 无路径：下载 tarball 并解压
-                await self._download_tarball(client, owner, repo, branch, tmp_dir)
+                await self._download_tarball(client, owner, repo, branch_candidates, tmp_dir)
 
         return tmp_dir
+
+    async def _get_repo_meta(
+        self,
+        client: httpx.AsyncClient,
+        owner: str,
+        repo: str,
+    ) -> Optional[Dict]:
+        """读取仓库元信息（用于校验存在性与默认分支）"""
+        url = f"https://api.github.com/repos/{owner}/{repo}"
+        headers = {"Accept": "application/vnd.github.v3+json"}
+        response = await client.get(url, headers=headers)
+        if response.status_code == 404:
+            return None
+        if response.status_code != 200:
+            raise Exception(f"读取仓库信息失败: {response.status_code}")
+        return response.json()
 
     async def _resolve_skill_path(
         self,
@@ -326,16 +390,26 @@ class SkillInstaller:
         client: httpx.AsyncClient,
         owner: str,
         repo: str,
-        branch: str,
+        branch_candidates: List[str],
         dest: Path,
     ):
         """下载仓库 tarball 并解压"""
-        url = f"https://api.github.com/repos/{owner}/{repo}/tarball/{branch}"
         headers = {"Accept": "application/vnd.github.v3+json"}
-
-        response = await client.get(url, headers=headers)
-        if response.status_code != 200:
-            raise Exception(f"下载 tarball 失败: {response.status_code}")
+        response = None
+        used_branch = None
+        for branch in branch_candidates:
+            url = f"https://api.github.com/repos/{owner}/{repo}/tarball/{branch}"
+            response = await client.get(url, headers=headers)
+            if response.status_code == 200:
+                used_branch = branch
+                break
+            logger.warning(f"下载 tarball 失败: {owner}/{repo}@{branch} -> {response.status_code}")
+        if not response or response.status_code != 200:
+            status_code = response.status_code if response else "unknown"
+            raise Exception(
+                f"下载 tarball 失败: {status_code}（已尝试分支: {', '.join(branch_candidates)}）"
+            )
+        logger.info(f"下载 tarball 成功: {owner}/{repo}@{used_branch}")
 
         tar_path = dest / "repo.tar.gz"
         tar_path.write_bytes(response.content)
@@ -572,6 +646,114 @@ class SkillInstaller:
         return results[:limit]
 
     # ── 卸载 ─────────────────────────────────────────────────
+
+
+    async def install_local_skill(self, local_path: str) -> Dict:
+        """Install skill from local directory or zip package."""
+        try:
+            source = Path(local_path).expanduser().resolve()
+            if not source.exists():
+                return {"success": False, "error": f"Path not found: {local_path}"}
+
+            tmp_dir: Optional[Path] = None
+            source_root = source
+            if source.is_file():
+                if source.suffix.lower() != ".zip":
+                    return {"success": False, "error": "Only .zip file is supported for local file install"}
+                tmp_dir = Path(tempfile.mkdtemp(prefix="skill_local_install_"))
+                with zipfile.ZipFile(source, "r") as zf:
+                    zf.extractall(tmp_dir)
+                source_root = tmp_dir
+
+            try:
+                skill_root = self._find_skill_root(source_root)
+                if not skill_root:
+                    return {"success": False, "error": "SKILL.md not found in local package"}
+
+                skill_name = self._normalize_skill_name(skill_root.name)
+                target_dir = self.skills_dir / skill_name
+                if target_dir.exists():
+                    shutil.rmtree(target_dir)
+                shutil.copytree(skill_root, target_dir)
+
+                self._manifest[skill_name] = {
+                    "source": "local",
+                    "source_path": str(source),
+                    "installed_at": datetime.now().isoformat(),
+                }
+                self._save_manifest()
+                return {"success": True, "skill_name": skill_name}
+            finally:
+                if tmp_dir:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception as e:
+            logger.error(f"Install local skill failed: {e}", exc_info=True)
+            return {"success": False, "error": f"Install local skill failed: {str(e)}"}
+
+    async def create_skill_scaffold(
+        self,
+        name: str,
+        display_name: str,
+        description: str = "",
+        category: str = "general",
+        trigger_keywords: Optional[list] = None,
+        tags: Optional[list] = None,
+    ) -> Dict:
+        """Create a minimal runnable skill scaffold in skills directory."""
+        skill_name = self._normalize_skill_name(name)
+        skill_dir = self.skills_dir / skill_name
+        if skill_dir.exists():
+            return {"success": False, "error": f"Skill already exists: {skill_name}"}
+
+        trigger_keywords = trigger_keywords or []
+        tags = tags or []
+        try:
+            (skill_dir / "scripts").mkdir(parents=True, exist_ok=True)
+            skill_md = f"""---
+name: {skill_name}
+display_name: {display_name}
+description: {description or "Custom skill"}
+category: {category}
+trigger_keywords: {json.dumps(trigger_keywords, ensure_ascii=False)}
+tags: {json.dumps(tags, ensure_ascii=False)}
+---
+
+# {display_name}
+
+??????? Skill ??????? `scripts/main.py` ????????
+"""
+            template_json = {
+                "name": skill_name,
+                "display_name": display_name,
+                "description": description or "Custom skill",
+                "category": category,
+                "trigger_keywords": trigger_keywords,
+                "tags": tags,
+            }
+            script_main = """#!/usr/bin/env python3
+import json
+import sys
+
+if __name__ == "__main__":
+    args = sys.argv[1:]
+    print(json.dumps({"ok": True, "args": args}, ensure_ascii=False))
+"""
+            (skill_dir / "SKILL.md").write_text(skill_md, encoding="utf-8")
+            (skill_dir / "template.json").write_text(
+                json.dumps(template_json, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            (skill_dir / "scripts" / "main.py").write_text(script_main, encoding="utf-8")
+
+            self._manifest[skill_name] = {
+                "source": "created",
+                "installed_at": datetime.now().isoformat(),
+            }
+            self._save_manifest()
+            return {"success": True, "skill_name": skill_name}
+        except Exception as e:
+            logger.error(f"Create skill scaffold failed: {e}", exc_info=True)
+            return {"success": False, "error": f"Create skill scaffold failed: {str(e)}"}
 
     async def uninstall_skill(self, skill_name: str) -> Dict:
         """卸载用户安装的技能"""

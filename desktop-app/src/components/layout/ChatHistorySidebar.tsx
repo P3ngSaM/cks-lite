@@ -1,7 +1,7 @@
-import { Plus, MessageSquare, Trash2 } from 'lucide-react'
+import { useState } from 'react'
+import { MessageSquare, Plus, Trash2 } from 'lucide-react'
 import { useChatStore } from '@/stores'
 import { cn } from '@/utils/cn'
-import { useState } from 'react'
 
 export const ChatHistorySidebar = () => {
   const sessions = useChatStore((state) => state.sessions)
@@ -23,7 +23,7 @@ export const ChatHistorySidebar = () => {
 
   const handleDeleteSession = (sessionId: string, e: React.MouseEvent) => {
     e.stopPropagation()
-    if (confirm('确定要删除这个对话吗？')) {
+    if (window.confirm('确定要删除这个对话吗？')) {
       deleteSession(sessionId)
     }
   }
@@ -107,9 +107,7 @@ export const ChatHistorySidebar = () => {
       </div>
 
       <div className="p-4 border-t border-neutral-800">
-        <div className="text-xs text-neutral-600 text-center">
-          共 {sessionList.length} 个对话
-        </div>
+        <div className="text-xs text-neutral-600 text-center">共 {sessionList.length} 个对话</div>
       </div>
     </div>
   )

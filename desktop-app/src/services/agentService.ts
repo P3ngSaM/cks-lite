@@ -3,18 +3,35 @@ import type {
   ChatResponse,
   MemoryRequest,
   MemorySearchResult,
+  MemorySearchV2Result,
+  MemoryDetailResult,
   MemoryListResult,
+  MemoryCompactResult,
+  MemoryConflictResolveResult,
+  MemoryMaintenanceReportResult,
+  MemoryConflictListResult,
+  MemoryMaintenanceAutoRunResult,
   SkillsResult,
   SkillDetailResult,
   SkillInstallResult,
   SkillReadinessResult,
   SkillSmokeTestResult,
+  SkillsSnapshotResult,
+  ExecutionApprovalCreateResult,
+  ExecutionApprovalListResult,
+  FeishuConfigResult,
+  FeishuConfigTestResult,
+  FeishuDiagnoseResult,
+  ChannelTaskResult,
+  ChannelTaskListResult,
   AuditRecordsResult,
   HealthStatus,
   GoalsTreeResult,
   GoalCreateResult,
   GoalActionResult,
   GoalTaskListResult,
+  GoalTaskExecutionResult,
+  GoalsDashboardResult,
 } from '../types/agent'
 import { withRetry, type RetryConfig } from '../utils/errorHandler'
 
@@ -227,6 +244,65 @@ export class AgentService {
     )
   }
 
+  static async searchMemoriesV2(
+    userId: string,
+    query: string,
+    topK: number = 5,
+    memoryType?: string
+  ): Promise<MemorySearchV2Result | null> {
+    return withRetry(
+      async () => {
+        const params = new URLSearchParams({
+          user_id: userId,
+          query,
+          top_k: topK.toString(),
+        })
+
+        if (memoryType) {
+          params.append('memory_type', memoryType)
+        }
+
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/memory/search-v2?${params}`
+        )
+
+        if (!response.ok) {
+          throw new Error(`Search memories v2 failed: ${response.statusText}`)
+        }
+
+        return response.json()
+      },
+      this.readRetryConfig,
+      'Search Memories V2'
+    )
+  }
+
+  static async getMemoryById(
+    userId: string,
+    memoryId: string
+  ): Promise<MemoryDetailResult | null> {
+    return withRetry(
+      async () => {
+        const params = new URLSearchParams({
+          user_id: userId,
+          memory_id: memoryId,
+        })
+
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/memory/get?${params}`
+        )
+
+        if (!response.ok) {
+          throw new Error(`Get memory by id failed: ${response.statusText}`)
+        }
+
+        return response.json()
+      },
+      this.readRetryConfig,
+      'Get Memory By Id'
+    )
+  }
+
   /**
    * Hybrid search memories (BM25 + Vector) - 混合搜索
    */
@@ -346,6 +422,22 @@ export class AgentService {
     )
   }
 
+  static async getSkillsSnapshot(): Promise<SkillsSnapshotResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(`${this.baseURL}/skills/snapshot`)
+
+        if (!response.ok) {
+          throw new Error(`Get skills snapshot failed: ${response.statusText}`)
+        }
+
+        return response.json()
+      },
+      this.readRetryConfig,
+      'Get Skills Snapshot'
+    )
+  }
+
   /**
    * Get skills readiness diagnostics
    */
@@ -406,7 +498,8 @@ export class AgentService {
     limit: number = 100,
     toolName?: string,
     fromTime?: string,
-    toTime?: string
+    toTime?: string,
+    goalTaskId?: number
   ): Promise<AuditRecordsResult | null> {
     return withRetry(
       async () => {
@@ -416,6 +509,9 @@ export class AgentService {
         }
         if (toolName) {
           params.append('tool_name', toolName)
+        }
+        if (goalTaskId) {
+          params.append('goal_task_id', String(goalTaskId))
         }
         if (fromTime) {
           params.append('from_time', fromTime)
@@ -448,7 +544,8 @@ export class AgentService {
     limit: number = 100,
     toolName?: string,
     fromTime?: string,
-    toTime?: string
+    toTime?: string,
+    goalTaskId?: number
   ): Promise<AuditRecordsResult | null> {
     return withRetry(
       async () => {
@@ -458,6 +555,9 @@ export class AgentService {
         }
         if (toolName) {
           params.append('tool_name', toolName)
+        }
+        if (goalTaskId) {
+          params.append('goal_task_id', String(goalTaskId))
         }
         if (fromTime) {
           params.append('from_time', fromTime)
@@ -485,10 +585,15 @@ export class AgentService {
   /**
    * Get KPI/OKR/Project/Task hierarchy
    */
-  static async getGoalsTree(): Promise<GoalsTreeResult | null> {
+  static async getGoalsTree(organizationId?: string): Promise<GoalsTreeResult | null> {
     return withRetry(
       async () => {
-        const response = await this.fetchWithTimeout(`${this.baseURL}/goals/tree`)
+        const params = new URLSearchParams()
+        if (organizationId) params.append('organization_id', organizationId)
+        const query = params.toString()
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/goals/tree${query ? `?${query}` : ''}`
+        )
 
         if (!response.ok) {
           throw new Error(`Get goals tree failed: ${response.statusText}`)
@@ -506,7 +611,8 @@ export class AgentService {
    */
   static async createKPI(
     title: string,
-    description: string = ''
+    description: string = '',
+    organizationId?: string
   ): Promise<GoalCreateResult | null> {
     return withRetry(
       async () => {
@@ -515,7 +621,7 @@ export class AgentService {
           headers: {
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ title, description }),
+          body: JSON.stringify({ title, description, organization_id: organizationId }),
         })
 
         if (!response.ok) {
@@ -594,7 +700,8 @@ export class AgentService {
     projectId: number,
     title: string,
     description: string = '',
-    assignee: string = ''
+    assignee: string = '',
+    department: string = ''
   ): Promise<GoalCreateResult | null> {
     return withRetry(
       async () => {
@@ -608,6 +715,7 @@ export class AgentService {
             title,
             description,
             assignee,
+            department,
           }),
         })
 
@@ -619,6 +727,90 @@ export class AgentService {
       },
       this.writeRetryConfig,
       'Create Task'
+    )
+  }
+
+  /**
+   * Delete task
+   */
+  static async deleteGoalTask(taskId: number): Promise<GoalActionResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(`${this.baseURL}/goals/task/${taskId}`, {
+          method: 'DELETE',
+        })
+
+        if (!response.ok) {
+          throw new Error(`Delete task failed: ${response.statusText}`)
+        }
+
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Delete Task'
+    )
+  }
+
+  /**
+   * Delete project (cascade delete tasks)
+   */
+  static async deleteGoalProject(projectId: number): Promise<GoalActionResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(`${this.baseURL}/goals/project/${projectId}`, {
+          method: 'DELETE',
+        })
+
+        if (!response.ok) {
+          throw new Error(`Delete project failed: ${response.statusText}`)
+        }
+
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Delete Project'
+    )
+  }
+
+  /**
+   * Delete OKR (cascade delete projects/tasks)
+   */
+  static async deleteGoalOKR(okrId: number): Promise<GoalActionResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(`${this.baseURL}/goals/okr/${okrId}`, {
+          method: 'DELETE',
+        })
+
+        if (!response.ok) {
+          throw new Error(`Delete OKR failed: ${response.statusText}`)
+        }
+
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Delete OKR'
+    )
+  }
+
+  /**
+   * Delete KPI (cascade delete all descendants)
+   */
+  static async deleteGoalKPI(kpiId: number): Promise<GoalActionResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(`${this.baseURL}/goals/kpi/${kpiId}`, {
+          method: 'DELETE',
+        })
+
+        if (!response.ok) {
+          throw new Error(`Delete KPI failed: ${response.statusText}`)
+        }
+
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Delete KPI'
     )
   }
 
@@ -645,12 +837,205 @@ export class AgentService {
   }
 
   /**
+   * Review a task: accept or reject
+   */
+  static async reviewGoalTask(
+    taskId: number,
+    decision: 'accept' | 'reject',
+    reason: string = '',
+    reviewedBy: string = 'manager'
+  ): Promise<GoalActionResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/goals/task/${taskId}/review`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              decision,
+              reason,
+              reviewed_by: reviewedBy,
+            }),
+          }
+        )
+
+        if (!response.ok) {
+          throw new Error(`Review task failed: ${response.statusText}`)
+        }
+
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Review Task'
+    )
+  }
+
+  /**
+   * Get execution flow state for a task
+   */
+  static async getGoalTaskExecutionState(taskId: number): Promise<GoalTaskExecutionResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/goals/task/${taskId}/execution/state`
+        )
+        if (!response.ok) {
+          throw new Error(`Get task execution state failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.readRetryConfig,
+      'Get Goal Task Execution State'
+    )
+  }
+
+  /**
+   * Update execution phase state for a task
+   */
+  static async updateGoalTaskExecutionState(
+    taskId: number,
+    phase: 'plan' | 'do' | 'verify',
+    status: 'idle' | 'active' | 'blocked' | 'done',
+    note: string = '',
+    prompt: string = ''
+  ): Promise<GoalTaskExecutionResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/goals/task/${taskId}/execution/phase`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              phase,
+              status,
+              note,
+              prompt,
+            }),
+          }
+        )
+        if (!response.ok) {
+          throw new Error(`Update task execution state failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Update Goal Task Execution State'
+    )
+  }
+
+  /**
+   * Resume task execution based on persisted phase state
+   */
+  static async resumeGoalTaskExecution(
+    taskId: number,
+    note: string = ''
+  ): Promise<GoalTaskExecutionResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/goals/task/${taskId}/execution/resume`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ note }),
+          }
+        )
+        if (!response.ok) {
+          throw new Error(`Resume task execution failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Resume Goal Task Execution'
+    )
+  }
+
+  /**
+   * Get manager dashboard summary and owner list
+   */
+  static async getGoalsDashboard(
+    options: {
+      organizationId?: string
+      fromTime?: string
+      toTime?: string
+      limit?: number
+    } = {}
+  ): Promise<GoalsDashboardResult | null> {
+    return withRetry(
+      async () => {
+        const params = new URLSearchParams()
+        if (options.organizationId) params.append('organization_id', options.organizationId)
+        if (options.fromTime) params.append('from_time', options.fromTime)
+        if (options.toTime) params.append('to_time', options.toTime)
+        params.append('limit', String(Math.max(1, Math.min(options.limit ?? 2000, 10000))))
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/goals/dashboard?${params.toString()}`
+        )
+        if (!response.ok) {
+          throw new Error(`Get goals dashboard failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.readRetryConfig,
+      'Get Goals Dashboard'
+    )
+  }
+
+  /**
+   * Set preferred next task for an assignee in board scheduling
+   */
+  static async setDashboardNextTask(
+    assignee: string,
+    taskId: number,
+    organizationId?: string
+  ): Promise<GoalActionResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/goals/dashboard/next-task`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              assignee,
+              task_id: taskId,
+              organization_id: organizationId,
+            }),
+          }
+        )
+        if (!response.ok) {
+          throw new Error(`Set dashboard next task failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Set Dashboard Next Task'
+    )
+  }
+
+  /**
    * List tasks with filters
    */
   static async listGoalTasks(
     options: {
+      organizationId?: string
+      taskId?: number
       assignee?: string
+      department?: string
       status?: string
+      reviewStatus?: string
+      handoffStatus?: string
+      handoffOwner?: string
       fromTime?: string
       toTime?: string
       limit?: number
@@ -659,8 +1044,14 @@ export class AgentService {
     return withRetry(
       async () => {
         const params = new URLSearchParams()
+        if (options.organizationId) params.append('organization_id', options.organizationId)
+        if (typeof options.taskId === 'number') params.append('task_id', String(options.taskId))
         if (options.assignee) params.append('assignee', options.assignee)
+        if (options.department) params.append('department', options.department)
         if (options.status) params.append('status', options.status)
+        if (options.reviewStatus) params.append('review_status', options.reviewStatus)
+        if (options.handoffStatus) params.append('handoff_status', options.handoffStatus)
+        if (options.handoffOwner) params.append('handoff_owner', options.handoffOwner)
         if (options.fromTime) params.append('from_time', options.fromTime)
         if (options.toTime) params.append('to_time', options.toTime)
         params.append('limit', String(Math.max(1, Math.min(options.limit ?? 200, 2000))))
@@ -676,6 +1067,37 @@ export class AgentService {
       },
       this.readRetryConfig,
       'List Goal Tasks'
+    )
+  }
+
+  /**
+   * Claim rejected task as human handoff owner
+   */
+  static async claimGoalTaskHandoff(
+    taskId: number,
+    owner: string = 'manager',
+    note: string = ''
+  ): Promise<GoalActionResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/goals/task/${taskId}/handoff/claim`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ owner, note }),
+          }
+        )
+
+        if (!response.ok) {
+          throw new Error(`Claim goal task handoff failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Claim Goal Task Handoff'
     )
   }
 
@@ -860,6 +1282,68 @@ export class AgentService {
       },
       this.writeRetryConfig,
       'Install Skill'
+    )
+  }
+
+  /**
+   * Install a skill from local folder or zip path
+   */
+  static async installSkillLocal(path: string): Promise<SkillInstallResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/skills/install/local`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ path }),
+          },
+          60000
+        )
+
+        if (!response.ok) {
+          throw new Error(`Install local skill failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Install Local Skill'
+    )
+  }
+
+  /**
+   * Create a local skill scaffold
+   */
+  static async createSkillScaffold(input: {
+    name: string
+    display_name: string
+    description?: string
+    category?: string
+    trigger_keywords?: string[]
+    tags?: string[]
+  }): Promise<SkillInstallResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/skills/create`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(input),
+          },
+          60000
+        )
+        if (!response.ok) {
+          throw new Error(`Create skill scaffold failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Create Skill Scaffold'
     )
   }
 
@@ -1081,6 +1565,437 @@ export class AgentService {
       },
       this.writeRetryConfig,
       'Clear All Memories'
+    )
+  }
+
+  static async createExecutionApproval(request: {
+    source?: string
+    tool_name: string
+    risk_level?: string
+    organization_id?: string
+    payload?: Record<string, any>
+    ttl_seconds?: number
+  }): Promise<ExecutionApprovalCreateResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(`${this.baseURL}/approvals/request`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(request),
+        })
+        if (!response.ok) {
+          throw new Error(`Create approval failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Create Execution Approval'
+    )
+  }
+
+  static async decideExecutionApproval(
+    requestId: string,
+    request: { decision: 'approved' | 'denied'; decided_by?: string; note?: string }
+  ): Promise<ExecutionApprovalCreateResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/approvals/${encodeURIComponent(requestId)}/decision`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(request),
+          }
+        )
+        if (!response.ok) {
+          throw new Error(`Decide approval failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Decide Execution Approval'
+    )
+  }
+
+  static async listExecutionApprovals(
+    status?: string,
+    limit: number = 50,
+    organizationId?: string,
+    sessionId?: string
+  ): Promise<ExecutionApprovalListResult | null> {
+    return withRetry(
+      async () => {
+        const params = new URLSearchParams()
+        if (status) params.append('status', status)
+        if (organizationId) params.append('organization_id', organizationId)
+        if (sessionId) params.append('session_id', sessionId)
+        params.append('limit', String(limit))
+        const response = await this.fetchWithTimeout(`${this.baseURL}/approvals?${params.toString()}`)
+        if (!response.ok) {
+          throw new Error(`List approvals failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.readRetryConfig,
+      'List Execution Approvals'
+    )
+  }
+
+  static async getFeishuConfig(): Promise<FeishuConfigResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(`${this.baseURL}/channels/feishu/config`)
+        if (!response.ok) {
+          throw new Error(`Get Feishu config failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.readRetryConfig,
+      'Get Feishu Config'
+    )
+  }
+
+  static async updateFeishuConfig(request: {
+    app_id: string
+    app_secret: string
+    verification_token: string
+    encrypt_key: string
+    domain: string
+    auto_dispatch: boolean
+    enable_approval_card: boolean
+    allowed_senders: string
+    signature_tolerance_sec: number
+    replay_cache_size: number
+  }): Promise<FeishuConfigResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(`${this.baseURL}/channels/feishu/config`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(request),
+        })
+        if (!response.ok) {
+          throw new Error(`Update Feishu config failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Update Feishu Config'
+    )
+  }
+
+  static async testFeishuConfig(request: {
+    send_probe: boolean
+    receive_id?: string
+    receive_id_type?: string
+    text?: string
+  }): Promise<FeishuConfigTestResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(`${this.baseURL}/channels/feishu/config/test`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(request),
+        })
+        if (!response.ok) {
+          throw new Error(`Test Feishu config failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Test Feishu Config'
+    )
+  }
+
+  static async diagnoseFeishuConfig(includeProbe: boolean = true): Promise<FeishuDiagnoseResult | null> {
+    return withRetry(
+      async () => {
+        const query = new URLSearchParams({
+          include_probe: includeProbe ? '1' : '0',
+        })
+        const response = await this.fetchWithTimeout(`${this.baseURL}/channels/feishu/config/diagnose?${query.toString()}`)
+        if (!response.ok) {
+          throw new Error(`Diagnose Feishu config failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.readRetryConfig,
+      'Diagnose Feishu Config'
+    )
+  }
+
+  static async enqueueFeishuInboundTask(request: {
+    sender_id: string
+    chat_id: string
+    message: string
+    auto_dispatch?: boolean
+    user_id?: string
+    metadata?: Record<string, any>
+    channel?: string
+  }): Promise<ChannelTaskResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(`${this.baseURL}/channels/feishu/inbound`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(request),
+        })
+        if (!response.ok) {
+          throw new Error(`Enqueue Feishu task failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Enqueue Feishu Task'
+    )
+  }
+
+  static async listChannelTasks(params?: {
+    channel?: string
+    status?: string
+    limit?: number
+  }): Promise<ChannelTaskListResult | null> {
+    return withRetry(
+      async () => {
+        const query = new URLSearchParams()
+        if (params?.channel) query.append('channel', params.channel)
+        if (params?.status) query.append('status', params.status)
+        query.append('limit', String(params?.limit ?? 20))
+        const response = await this.fetchWithTimeout(`${this.baseURL}/channels/tasks?${query.toString()}`)
+        if (!response.ok) {
+          throw new Error(`List channel tasks failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.readRetryConfig,
+      'List Channel Tasks'
+    )
+  }
+
+  static async controlChannelTask(
+    taskId: number,
+    action: 'pause' | 'resume' | 'cancel' | 'retry'
+  ): Promise<ChannelTaskResult | null> {
+    return withRetry(
+      async () => {
+        const query = new URLSearchParams({ action })
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/channels/tasks/${taskId}/control?${query.toString()}`,
+          {
+            method: 'POST',
+          }
+        )
+        if (!response.ok) {
+          throw new Error(`Control channel task failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Control Channel Task'
+    )
+  }
+
+  static async visionNextAction(request: {
+    image_path: string
+    goal: string
+    history?: string
+  }): Promise<any> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(`${this.baseURL}/vision/next-action`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            image_path: request.image_path,
+            goal: request.goal,
+            history: request.history || '',
+          }),
+        })
+        if (!response.ok) {
+          throw new Error(`Vision next action failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Vision Next Action'
+    )
+  }
+
+  static async dispatchChannelTask(taskId: number, request?: {
+    user_id?: string
+    session_id?: string
+    use_memory?: boolean
+  }): Promise<ChannelTaskResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(`${this.baseURL}/channels/tasks/${taskId}/dispatch`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            user_id: request?.user_id || 'default-user',
+            session_id: request?.session_id,
+            use_memory: request?.use_memory ?? true,
+          }),
+        })
+        if (!response.ok) {
+          throw new Error(`Dispatch channel task failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Dispatch Channel Task'
+    )
+  }
+
+  /**
+   * Run anti-corrosion memory compaction (dedupe + stale prune)
+   */
+  static async compactMemories(
+    userId: string,
+    dedupeThreshold: number = 0.985,
+    staleDays: number = 120,
+    dryRun: boolean = false
+  ): Promise<MemoryCompactResult | null> {
+    return withRetry(
+      async () => {
+        const params = new URLSearchParams({
+          user_id: userId,
+          dedupe_threshold: dedupeThreshold.toString(),
+          stale_days: staleDays.toString(),
+          dry_run: dryRun.toString(),
+        })
+
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/memory/maintenance/compact?${params}`,
+          { method: 'POST' }
+        )
+
+        if (!response.ok) {
+          throw new Error(`Compact memories failed: ${response.statusText}`)
+        }
+
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Compact Memories'
+    )
+  }
+
+  /**
+   * Resolve a conflict-marked memory item.
+   */
+  static async resolveMemoryConflict(
+    memoryId: string,
+    action: 'accept_current' | 'keep_all' = 'accept_current'
+  ): Promise<MemoryConflictResolveResult | null> {
+    return withRetry(
+      async () => {
+        const params = new URLSearchParams({ action })
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/memory/${memoryId}/resolve-conflict?${params}`,
+          { method: 'POST' }
+        )
+
+        if (!response.ok) {
+          throw new Error(`Resolve memory conflict failed: ${response.statusText}`)
+        }
+
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Resolve Memory Conflict'
+    )
+  }
+
+  static async getMemoryConflicts(
+    userId: string,
+    status: 'pending_review' | 'resolved' | 'superseded' | 'all' = 'pending_review',
+    limit: number = 100
+  ): Promise<MemoryConflictListResult | null> {
+    return withRetry(
+      async () => {
+        const params = new URLSearchParams({
+          user_id: userId,
+          status,
+          limit: limit.toString(),
+        })
+        const response = await this.fetchWithTimeout(`${this.baseURL}/memory/conflicts?${params}`)
+        if (!response.ok) {
+          throw new Error(`Get memory conflicts failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.readRetryConfig,
+      'Get Memory Conflicts'
+    )
+  }
+
+  static async getMemoryMaintenanceReport(
+    userId: string,
+    dedupeThreshold: number = 0.985,
+    staleDays: number = 120
+  ): Promise<MemoryMaintenanceReportResult | null> {
+    return withRetry(
+      async () => {
+        const params = new URLSearchParams({
+          user_id: userId,
+          dedupe_threshold: dedupeThreshold.toString(),
+          stale_days: staleDays.toString(),
+        })
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/memory/maintenance/report?${params}`
+        )
+        if (!response.ok) {
+          throw new Error(`Get memory maintenance report failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.readRetryConfig,
+      'Get Memory Maintenance Report'
+    )
+  }
+
+  static async autoRunMemoryMaintenance(
+    userId: string,
+    intervalHours: number = 24,
+    force: boolean = false,
+    dedupeThreshold: number = 0.985,
+    staleDays: number = 120
+  ): Promise<MemoryMaintenanceAutoRunResult | null> {
+    return withRetry(
+      async () => {
+        const params = new URLSearchParams({
+          user_id: userId,
+          interval_hours: intervalHours.toString(),
+          force: force.toString(),
+          dedupe_threshold: dedupeThreshold.toString(),
+          stale_days: staleDays.toString(),
+        })
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/memory/maintenance/auto-run?${params}`,
+          { method: 'POST' }
+        )
+        if (!response.ok) {
+          throw new Error(`Auto-run memory maintenance failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Auto Run Memory Maintenance'
     )
   }
 }

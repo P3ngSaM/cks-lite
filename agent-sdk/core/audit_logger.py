@@ -9,7 +9,7 @@ import json
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 
 SENSITIVE_KEYS = {
@@ -70,6 +70,7 @@ class AuditLogger:
         success: bool,
         duration_ms: int,
         message: str = "",
+        goal_task_id: Optional[int] = None,
     ) -> None:
         now = datetime.now().isoformat()
         masked_input = _mask_sensitive(tool_input or {})
@@ -86,6 +87,8 @@ class AuditLogger:
             "duration_ms": duration_ms,
             "message": (message or "")[:1000],
         }
+        if goal_task_id is not None:
+            payload["goal_task_id"] = goal_task_id
         self._append_jsonl(self._daily_filename("execution"), payload)
 
     def log_error(
@@ -97,6 +100,7 @@ class AuditLogger:
         tool_input: Dict[str, Any],
         error: str,
         duration_ms: int,
+        goal_task_id: Optional[int] = None,
     ) -> None:
         now = datetime.now().isoformat()
         masked_input = _mask_sensitive(tool_input or {})
@@ -112,4 +116,6 @@ class AuditLogger:
             "error": (error or "")[:2000],
             "duration_ms": duration_ms,
         }
+        if goal_task_id is not None:
+            payload["goal_task_id"] = goal_task_id
         self._append_jsonl(self._daily_filename("error"), payload)

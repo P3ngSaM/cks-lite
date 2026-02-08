@@ -2,8 +2,8 @@
   "find-skills": {
     "owner": "vercel-labs",
     "repo": "skills",
-    "path": "skills/find-skills",
-    "installed_at": "2026-02-06T21:26:31.343047",
+    "path": "find-skills",
+    "installed_at": "2026-02-08T12:17:29.268242",
     "github_url": "https://github.com/vercel-labs/skills"
   },
   "playwright": {
@@ -47,5 +47,47 @@
     "path": "skills/.curated/spreadsheet",
     "installed_at": "2026-02-06T21:39:56.085359",
     "github_url": "https://github.com/openai/skills"
+  },
+  "algorithmic-art": {
+    "owner": "anthropics",
+    "repo": "skills",
+    "path": null,
+    "installed_at": "2026-02-08T12:14:23.895101",
+    "github_url": "https://github.com/anthropics/skills"
+  },
+  "react-best-practices": {
+    "owner": "vercel-labs",
+    "repo": "agent-skills",
+    "path": "skills/react-best-practices",
+    "installed_at": "2026-02-08T12:20:02.911667",
+    "github_url": "https://github.com/vercel-labs/agent-skills"
+  },
+  "web-design-guidelines": {
+    "owner": "vercel-labs",
+    "repo": "agent-skills",
+    "path": "skills/web-design-guidelines",
+    "installed_at": "2026-02-08T12:17:27.142154",
+    "github_url": "https://github.com/vercel-labs/agent-skills"
+  },
+  "internal-comms": {
+    "owner": "anthropics",
+    "repo": "skills",
+    "path": "skills/internal-comms",
+    "installed_at": "2026-02-08T12:25:57.699659",
+    "github_url": "https://github.com/anthropics/skills"
+  },
+  "doc-coauthoring": {
+    "owner": "anthropics",
+    "repo": "skills",
+    "path": "skills/doc-coauthoring",
+    "installed_at": "2026-02-08T12:23:05.347773",
+    "github_url": "https://github.com/anthropics/skills"
+  },
+  "pptx": {
+    "owner": "anthropics",
+    "repo": "skills",
+    "path": "skills/pptx",
+    "installed_at": "2026-02-08T12:23:30.844440",
+    "github_url": "https://github.com/anthropics/skills"
   }
 }

@@ -227,3 +227,117 @@ CKS Lite 的核心初心是：
     - chat requests can bind `goal_task_id`;
     - stream flow auto-completes the bound task after successful tool execution + `done`.
   - Added goals task filtering API (`from/to`, assignee, status) and desktop CSV export for operational review.
+  - Added task-detail drawer + one-click task-audit replay on Goals page, closing the "task -> execution trace" loop for operations.
+  - Upgraded goal-task binding to session-scoped persistence (multi-session friendly), avoiding global task binding conflicts.
+  - Hardened goal writeback completion gate to avoid false-positive completion on partial-fail tool runs.
+  - Added cross-platform desktop bundle CI pipeline (Windows + macOS) to advance exe/dmg delivery path.
+  - Added desktop runtime auto-start for bundled Agent SDK to improve out-of-box usability for exe/dmg users.
+  - Added startup diagnostics path (python/runtime/resource checks) to reduce desktop deployment troubleshooting cost.
+  - Added first-launch health card in Settings for non-technical troubleshooting and one-click backend start.
+- Memory system effectiveness upgraded (2026-02-07):
+  - Added duplicate-memory guard on save to reduce noise and index bloat.
+  - Added importance estimation + metadata override path for stronger long-term memory weighting.
+  - Added recency/importance/access-aware reranking in both hybrid and fallback retrieval pipelines.
+  - Added memory regression tests for dedup + ranking behavior to keep quality stable in later iterations.
+- Memory dedup advanced to near-duplicate matching (2026-02-07):
+  - Added configurable threshold `MEMORY_DUPLICATE_THRESHOLD` (default 0.96).
+  - Added regression test for punctuation/format variant dedup to prevent memory noise growth.
+- Memory UX visibility improved (2026-02-07):
+  - Added Chinese-first Memory page rewrite with cleaner operations and readability.
+  - Added per-item retrieval explanation panel (hybrid/vector/text/final score + importance/recency factors).
+  - Strengthened type contract so score fields are reliably consumable on frontend.
+- Memory explainability strengthened (2026-02-07):
+  - Added human-readable retrieval reason chips on memory cards, bridging score details to business language.
+- Memory operations panel expanded (2026-02-07):
+  - Added sorting, source filtering, high-priority-only focus mode, and export (JSON/CSV) on the Memory page.
+  - This improves usability for ops review and manager-side memory auditing.
+- Memory anti-corrosion foundation delivered (2026-02-07):
+  - freshness TTL metadata + stale penalty,
+  - factual conflict detection with pending-review state,
+  - maintenance compaction API (dedupe + stale-noise pruning),
+  - frontend operation entry for one-click anti-corrosion maintenance.
+- Memory anti-corrosion operation loop closed (2026-02-07):
+  - added conflict resolution API + UI action,
+  - added dry-run maintenance preview for safe pruning decisions,
+  - expanded test coverage to include conflict-resolution propagation.
+- Memory patrol plan advanced (2026-02-07):
+  - added maintenance report endpoint and scheduled auto-run mechanism,
+  - added conflict queue API and UI focus filter for pending-review items,
+  - provides safer long-term memory hygiene with predictable cadence.
+- Execution main-chain improved (2026-02-07):
+  - Goals page now supports one-click jump into Workbench execution with session-scoped task binding,
+  - reducing friction from planning to actual agent action.
+- Main chain execution UX improved (2026-02-07):
+  - Workbench now reads bound goal task context directly and provides execution quick-prompts + completion status cue.
+  - Supports direct task lookup in goals task API via `task_id`, reducing frontend query friction.
+- Main chain acceptance loop completed (2026-02-07 17:15):
+  - Added goal task human-review API (`accept/reject`) with review metadata persistence.
+  - Goals detail drawer now supports one-click `验收通过/驳回返工` and reviewer note input.
+  - Completion now explicitly enters `待验收` state before final acceptance, keeping execution and managerial acceptance separated.
+  - Added regression tests for review-state transitions and validated backend/frontend build pipelines.
+- Main chain operations improved (2026-02-07 17:21):
+  - Added `review_status` filter in goals task list API for manager-side triage.
+  - Goals page now supports one-click `仅看待验收` quick filter.
+  - Added batch task review actions (batch accept/reject + optional note), speeding up manager acceptance flow.
+  - Added regression test for task list filtering by review status and completed full build/test verification.
+- Main chain jump-to-review improved (2026-02-07 17:23):
+  - Workbench now shows a pending-review reminder card when task writeback is complete but acceptance is pending.
+  - Added one-click navigation from Workbench to Goals with `task_id` deep-link.
+  - Goals page now auto-opens the corresponding task detail and audit replay context from query parameter.
+  - This closes the execution-to-acceptance handoff gap for manager workflows.
+- Main chain review round-trip completed (2026-02-07 17:26):
+  - Added source-aware jump (`from=workbench`) from Workbench to Goals review page.
+  - On manual review success, Goals now auto-returns to Workbench with review result params.
+  - Workbench now renders transient accept/reject result feedback after return, completing end-to-end execution-review loop UX.
+- Main chain post-review execution improved (2026-02-07 17:28):
+  - Added one-click rework shortcuts after reject (generate rework plan / start first fix step).
+  - Added one-click next-stage planning shortcut after accept.
+  - Keeps users inside one session and turns review result into immediate executable follow-up.
+- Main chain execution planner delivered (2026-02-07 17:33):
+  - Added Plan/Do/Verify execution cockpit in Workbench.
+  - Added session-level interruption recovery state (phase + note + task binding) with persistence.
+  - Added one-click phase resume and phase switching to reduce long-task context loss.
+  - Integrated review result feedback into phase state transitions (`reject -> do`, `accept -> verify`).
+- Lightweight desktop optimization advanced (2026-02-07 17:50):
+  - Switched core routes to lazy loading (Workbench/Memory/Skills/Goals/Settings).
+  - Added route-level suspense fallback for smoother perceived loading.
+  - Build no longer reports oversized monolithic entry chunk; page chunks are now split by route.
+- Demo readiness improved (2026-02-07 17:53):
+  - Goals page added one-click demo data seeding for fast live setup.
+  - Added `docs/demo-runbook.md` with a 10-minute deterministic demo path and troubleshooting cues.
+- Execution engine v1 landed (2026-02-07 18:01):
+  - Added backend persisted phase-state machine for task execution (`plan/do/verify`).
+  - Added execution state APIs (read/update/resume) and frontend integration in Workbench.
+  - Resume now uses backend-generated prompts, reducing front-end-only recovery fragility.
+  - Added unit-test coverage for execution-state transitions and resume behavior.
+- Manager visibility MVP landed (2026-02-07 18:10):
+  - Added first `老板看板` page with 4 KPI cards and owner-level task table.
+  - Added backend dashboard API (`/goals/dashboard`) for summary and assignee aggregation.
+  - Added sidebar navigation entry for manager quick access.
+  - Memory page core Chinese text mojibake fixed for on-stage demo readability.
+- Manager action loop improved (2026-02-07 18:22):
+  - Board now supports one-click drill-down to Goals with assignee/review filters.
+  - Goals page now auto-parses URL filters and applies list filtering on load.
+  - This closes board insight -> task action handoff for demo and daily operations.
+- Manager demo expressiveness improved (2026-02-07 18:28):
+  - Board now supports a game-style view with pixel avatars for assignees.
+  - Clicking an avatar opens owner detail with project list and execution status summary.
+  - Added one-click launch from board to Workbench with auto task binding for that assignee.
+- Demo data realism improved (2026-02-07 18:34):
+  - Added `seed_realistic_demo_data.py` to generate a richer multi-owner dataset.
+  - Dataset includes mixed review/execution states to better stress-test board and workbench flows.
+  - Seed-and-verify loop now documented for repeatable pre-demo setup.
+- Board game-mode expressiveness improved (2026-02-07 18:42):
+  - Added status-driven avatar animation cues (pending/rework pulse, in-progress bounce).
+  - Normalized board Chinese UI labels for demo consistency.
+  - Re-ran realistic data seeding to expand sample volume for on-stage stress demo.
+- Board scheduling control improved (2026-02-07 18:56):
+  - Added manager-side “set as next task” override for each assignee.
+  - Board now supports task-bubble selection -> assign next task -> immediate one-click execution.
+  - This strengthens the “老板调度 -> 数字员工执行” narrative for live demos.
+
+- Manager handoff workflow improved (2026-02-07 20:12):
+  - Added explicit rejected-task handoff claim API (`POST /goals/task/{task_id}/handoff/claim`).
+  - Introduced task-level handoff state (`pending/claimed/resolved`) with owner and timestamps.
+  - Board now has a "ת�˹�������" queue with one-click "���ֲ����� Workbench".
+  - Added 7-day trend cards (rejected / pending review / claimed) to improve manager visibility.
