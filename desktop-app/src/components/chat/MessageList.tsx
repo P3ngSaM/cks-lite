@@ -46,12 +46,13 @@ export const MessageList = ({ messages, isLoading }: MessageListProps) => {
   }
 
   return (
-    <div
-      ref={containerRef}
-      onScroll={handleScroll}
-      className="h-full overflow-y-auto px-6 py-8"
-    >
+    <div ref={containerRef} onScroll={handleScroll} className="relative h-full overflow-y-auto px-6 py-8">
       <div className="max-w-4xl mx-auto space-y-6">
+        {isLoading && (
+          <div className="sticky top-0 z-10 flex justify-center">
+            <div className="cks-surface-subtle px-2 py-1 text-[11px] text-cyan-300">AI 正在思考并执行中...</div>
+          </div>
+        )}
         {messages.map((message) => (
           <Message key={message.id} message={message} />
         ))}
@@ -71,6 +72,18 @@ export const MessageList = ({ messages, isLoading }: MessageListProps) => {
         {/* Scroll anchor */}
         <div ref={messagesEndRef} />
       </div>
+      {!autoScrollEnabled && messages.length > 0 && (
+        <button
+          type="button"
+          onClick={() => {
+            setAutoScrollEnabled(true)
+            messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+          }}
+          className="cks-btn cks-btn-secondary cks-focus-ring cks-transition-fast fixed bottom-28 right-8 z-20"
+        >
+          回到底部
+        </button>
+      )}
     </div>
   )
 }

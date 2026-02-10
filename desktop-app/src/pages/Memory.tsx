@@ -11,6 +11,7 @@ import {
   Zap,
 } from 'lucide-react'
 import { MemoryList, SearchBar } from '@/components/memory'
+import { PageHeader } from '@/components/ui'
 import { AgentService } from '@/services/agentService'
 import { useMemoryStore } from '@/stores'
 import type { Memory as MemoryItem } from '@/types/agent'
@@ -383,19 +384,15 @@ export const Memory = () => {
 
   return (
     <div className="h-full flex flex-col bg-black text-white">
-      <div className="border-b border-neutral-900 px-6 py-4">
-        <div className="max-w-5xl mx-auto">
-          <div className="flex items-center justify-between gap-3 mb-4">
-            <div>
-              <h1 className="text-lg font-semibold flex items-center gap-2">
-                <SearchIcon className="h-5 w-5 text-neutral-400" />
-                记忆中心
-              </h1>
-              <p className="text-sm text-neutral-500 mt-1">
-                管理长期记忆，支持检索、筛选、冲突处理与维护巡检。
-              </p>
-            </div>
-            <div className="flex items-center gap-2">
+      <div className="border-b border-neutral-900 px-4 py-4 md:px-6">
+        <div className="max-w-6xl mx-auto">
+          <div className="mb-4">
+            <PageHeader
+              title="记忆中心"
+              subtitle="管理长期记忆，支持检索、筛选、冲突处理与维护巡检"
+              icon={<SearchIcon className="h-5 w-5 text-neutral-400" />}
+              actions={(
+                <>
               <button
                 onClick={() => setUseHybridSearch((prev) => !prev)}
                 className={cn(
@@ -421,38 +418,40 @@ export const Memory = () => {
               </button>
               <button
                 onClick={() => setShowAddForm((prev) => !prev)}
-                className="px-3 py-1.5 rounded-lg text-xs border border-neutral-700 text-neutral-300 hover:text-white hover:bg-neutral-900"
+                className="cks-btn cks-btn-secondary"
               >
                 <Plus className="h-3.5 w-3.5 inline mr-1" />新增
               </button>
               <button
                 onClick={loadMemories}
-                className="px-3 py-1.5 rounded-lg text-xs border border-neutral-700 text-neutral-300 hover:text-white hover:bg-neutral-900"
+                className="cks-btn cks-btn-secondary"
               >
                 <RefreshCw className="h-3.5 w-3.5 inline mr-1" />刷新
               </button>
               <button
                 onClick={handleClearAll}
                 disabled={isClearing}
-                className="px-3 py-1.5 rounded-lg text-xs border border-red-500/40 text-red-300 hover:bg-red-500/10 disabled:opacity-50"
+                className="cks-btn cks-btn-danger border-red-500/40 text-red-300 hover:bg-red-500/10 disabled:opacity-50"
               >
                 <Trash2 className="h-3.5 w-3.5 inline mr-1" />清空
               </button>
               <button
                 onClick={handleCompact}
                 disabled={isCompacting}
-                className="px-3 py-1.5 rounded-lg text-xs border border-cyan-500/40 text-cyan-300 hover:bg-cyan-500/10 disabled:opacity-50"
+                className="cks-btn cks-btn-primary disabled:opacity-50"
               >
                 <Wrench className="h-3.5 w-3.5 inline mr-1" />{isCompacting ? '维护中...' : '抗腐蚀维护'}
               </button>
               <button
                 onClick={handlePreviewCompact}
                 disabled={isPreviewingCompact}
-                className="px-3 py-1.5 rounded-lg text-xs border border-neutral-700 text-neutral-300 hover:text-white hover:bg-neutral-900 disabled:opacity-50"
+                className="cks-btn cks-btn-secondary disabled:opacity-50"
               >
                 {isPreviewingCompact ? '预览中...' : '预览维护'}
               </button>
-            </div>
+                </>
+              )}
+            />
           </div>
 
           <div className="mb-4">
@@ -515,7 +514,7 @@ export const Memory = () => {
             <select
               value={sortMode}
               onChange={(event) => setSortMode(event.target.value as SortMode)}
-              className="rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1.5 text-xs text-neutral-200"
+              className="cks-input px-2 py-1.5 text-xs"
             >
               <option value="relevance">按相关度</option>
               <option value="time">按时间</option>
@@ -525,7 +524,7 @@ export const Memory = () => {
             <select
               value={sourceFilter}
               onChange={(event) => setSourceFilter(event.target.value as SourceFilter)}
-              className="rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1.5 text-xs text-neutral-200"
+              className="cks-input px-2 py-1.5 text-xs"
             >
               <option value="all">全部来源</option>
               <option value="direct_match">直匹配</option>
@@ -574,8 +573,8 @@ export const Memory = () => {
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-6">
-        <div className="max-w-5xl mx-auto space-y-6">
+      <div className="flex-1 overflow-y-auto p-4 md:p-6">
+        <div className="max-w-6xl mx-auto space-y-6">
           {showAddForm && (
             <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-5">
               <h3 className="text-base font-semibold text-white mb-3">新增记忆</h3>
@@ -584,13 +583,13 @@ export const Memory = () => {
                 onChange={(event) => setNewMemoryContent(event.target.value)}
                 placeholder="输入要保存的记忆..."
                 rows={3}
-                className="w-full px-4 py-3 rounded-lg resize-none bg-black text-white border border-neutral-800 focus:outline-none focus:border-white placeholder:text-neutral-600"
+                className="cks-textarea w-full px-4 py-3 resize-none"
               />
               <div className="flex items-center gap-2 mt-3">
                 <button
                   onClick={handleAddMemory}
                   disabled={isAdding || !newMemoryContent.trim()}
-                  className="px-4 py-2 rounded-lg bg-white text-black hover:bg-neutral-200 transition-colors disabled:opacity-40 disabled:cursor-not-allowed text-sm font-medium"
+                  className="cks-btn cks-btn-primary py-2 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   {isAdding ? '保存中...' : '保存'}
                 </button>

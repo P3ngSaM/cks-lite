@@ -16,8 +16,10 @@ import {
 import { useNavigate } from 'react-router-dom'
 import { AgentService } from '@/services/agentService'
 import { TauriService } from '@/services/tauriService'
+import { MoreActions, PageHeader } from '@/components/ui'
 import { cn } from '@/utils/cn'
-import type { ChannelTask, GoalTaskListItem } from '@/types/agent'
+import { getNodeStatusMeta, getTaskStatusMeta, normalizeTaskStatusKey } from '@/utils/statusMeta'
+import type { AgentNodeProfile, ChannelTask, GoalTaskListItem } from '@/types/agent'
 
 type MessageState = { type: 'success' | 'error'; text: string } | null
 type VisualLogLevel = 'running' | 'success' | 'warn' | 'error'
@@ -67,6 +69,7 @@ export const Automation = () => {
   } | null>(null)
   const [feishuRecordsLoading, setFeishuRecordsLoading] = useState(false)
   const [feishuRecords, setFeishuRecords] = useState<ChannelTask[]>([])
+  const [showFeishuConfigPanel, setShowFeishuConfigPanel] = useState(false)
   const [feishuOwnerFilter, setFeishuOwnerFilter] = useState('all')
   const [feishuStatusFilter, setFeishuStatusFilter] = useState<'all' | 'pending' | 'running' | 'waiting_approval' | 'paused' | 'completed' | 'failed' | 'canceled'>('all')
   const [goalTaskMap, setGoalTaskMap] = useState<Record<number, GoalTaskListItem>>({})
@@ -82,6 +85,16 @@ export const Automation = () => {
   })
 
   const [platformInfo, setPlatformInfo] = useState<{ os: string; arch: string } | null>(null)
+  const [organizationId] = useState<string>(() => {
+    const saved = localStorage.getItem('cks.organizationId')
+    return (saved || 'default-org').trim() || 'default-org'
+  })
+  const [nodesLoading, setNodesLoading] = useState(false)
+  const [nodes, setNodes] = useState<AgentNodeProfile[]>([])
+  const [nodeCapabilityFilter, setNodeCapabilityFilter] = useState('all')
+  const [nodeSelectCapability, setNodeSelectCapability] = useState('desktop')
+  const [nodeSelecting, setNodeSelecting] = useState(false)
+  const [selectedNode, setSelectedNode] = useState<AgentNodeProfile | null>(null)
   const [desktopBusy, setDesktopBusy] = useState(false)
   const [desktopAppName, setDesktopAppName] = useState('')
   const [desktopTargetApp, setDesktopTargetApp] = useState('')
@@ -110,24 +123,20 @@ export const Automation = () => {
     return 'Linux 推荐应用：gedit / code / firefox'
   }, [platformInfo])
 
-  const normalizeTaskStatus = (value: string): string => {
-    const normalized = String(value || '').trim().toLowerCase()
-    if (!normalized) return 'pending'
-    if (normalized === 'done' || normalized === 'complete' || normalized === 'success') return 'completed'
-    if (normalized === 'waitingapproval' || normalized === 'waiting-approval' || normalized === 'awaiting_approval') return 'waiting_approval'
-    if (normalized === 'cancelled') return 'canceled'
-    return normalized
-  }
+  const capabilityOptions = useMemo(() => {
+    const set = new Set<string>()
+    for (const item of nodes) {
+      for (const cap of item.capabilities || []) {
+        if (cap) set.add(cap)
+      }
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b))
+  }, [nodes])
 
-  const statusLabelMap: Record<string, string> = {
-    pending: '待执行',
-    running: '执行中',
-    waiting_approval: '待审批',
-    paused: '已暂停',
-    completed: '已完成',
-    failed: '执行失败',
-    canceled: '已取消',
-  }
+  const visibleNodes = useMemo(() => {
+    if (nodeCapabilityFilter === 'all') return nodes
+    return nodes.filter((item) => (item.capabilities || []).includes(nodeCapabilityFilter))
+  }, [nodeCapabilityFilter, nodes])
 
   const feishuConversations = useMemo(() => {
     const map = new Map<string, ChannelTask[]>()
@@ -163,6 +172,11 @@ export const Automation = () => {
         const latestResult = (latest?.result && typeof latest.result === 'object')
           ? (latest.result as Record<string, unknown>)
           : {}
+        const executionNodeId = String(
+          latestResult.execution_node_id ||
+          latestMeta.execution_node_id ||
+          ''
+        ).trim()
         const goalTaskId =
           parseGoalTaskId(latestMeta.goal_task_id) ||
           parseGoalTaskId(latestResult.goal_task_id) ||
@@ -173,8 +187,9 @@ export const Automation = () => {
           ...conv,
           latestId,
           owner,
-          latestStatus: normalizeTaskStatus(String(latest?.status || 'pending')),
+          latestStatus: normalizeTaskStatusKey(String(latest?.status || 'pending')),
           goalTaskId,
+          executionNodeId,
           unread: latestId > seenId,
         }
       })
@@ -284,14 +299,56 @@ export const Automation = () => {
     }
   }
 
+  const loadNodes = async () => {
+    setNodesLoading(true)
+    try {
+      const result = await AgentService.listNodes({ organizationId, limit: 50 })
+      if (result?.success && Array.isArray(result.items)) {
+        setNodes(result.items)
+      } else {
+        setNodes([])
+      }
+    } catch (error) {
+      console.error('Failed to load nodes:', error)
+      setNodes([])
+    } finally {
+      setNodesLoading(false)
+    }
+  }
+
+  const handleSelectNode = async () => {
+    setNodeSelecting(true)
+    try {
+      const result = await AgentService.selectNode({
+        organizationId,
+        capability: nodeSelectCapability === 'all' ? '' : nodeSelectCapability,
+        preferredOs: platformInfo?.os || '',
+      })
+      if (result?.success && result.node) {
+        setSelectedNode(result.node)
+        showMessage('success', `已选择执行节点：${result.node.display_name || result.node.node_id}`)
+        return
+      }
+      setSelectedNode(null)
+      showMessage('error', result?.error || '未找到可用执行节点')
+    } catch (error) {
+      setSelectedNode(null)
+      showMessage('error', `节点选择失败: ${String(error)}`)
+    } finally {
+      setNodeSelecting(false)
+    }
+  }
+
   useEffect(() => {
     loadFeishuConfig()
     loadFeishuRecords()
+    loadNodes()
     const timer = window.setInterval(() => {
       void loadFeishuRecords()
+      void loadNodes()
     }, 15000)
     return () => window.clearInterval(timer)
-  }, [])
+  }, [organizationId])
   useEffect(() => {
     localStorage.setItem('cks.automation.feishuSeenMap', JSON.stringify(seenChatMap))
   }, [seenChatMap])
@@ -421,6 +478,7 @@ export const Automation = () => {
       const dispatchResult = await AgentService.dispatchChannelTask(enqueueResult.task.id, {
         user_id: 'default-user',
         use_memory: true,
+        node_id: selectedNode?.node_id || '',
       })
       if (!dispatchResult?.success) {
         showMessage('error', dispatchResult?.error || '联调失败：任务派发失败')
@@ -682,12 +740,18 @@ export const Automation = () => {
     const latestLogs = visualLogs.slice(-6).map((item) => `第 ${item.step} 步：${item.text}`).join('\n')
     const seed = [
       `请接管视觉自动化任务：${visualGoal.trim()}`,
+      selectedNode ? `优先执行节点：${selectedNode.display_name || selectedNode.node_id}` : '',
       latestLogs ? `最近执行日志：\n${latestLogs}` : '',
       '请先判断卡点原因，再继续执行并输出可验证结果。',
     ]
       .filter(Boolean)
       .join('\n\n')
     localStorage.setItem('cks.workbench.seedPrompt', seed)
+    if (selectedNode?.node_id) {
+      localStorage.setItem('cks.workbench.executionNodeId', selectedNode.node_id)
+    } else {
+      localStorage.removeItem('cks.workbench.executionNodeId')
+    }
     navigate('/workbench')
   }
 
@@ -726,15 +790,13 @@ export const Automation = () => {
   }
 
   return (
-    <div className="h-full overflow-y-auto text-white p-6">
-      <div className="max-w-6xl mx-auto space-y-4">
-        <div className="rounded-lg border border-neutral-800 bg-neutral-950/80 p-4">
-          <h1 className="text-lg font-semibold flex items-center gap-2">
-            <TerminalSquare className="h-5 w-5 text-cyan-300" />
-            自动化中控
-          </h1>
-          <p className="text-xs text-neutral-400 mt-1">飞书调度 + 桌面自动化 + 会话同步视图。</p>
-        </div>
+    <div className="h-full overflow-y-auto text-white p-4 md:p-6">
+      <div className="max-w-7xl mx-auto space-y-4">
+        <PageHeader
+          title="自动化中控"
+          subtitle="飞书调度 + 桌面自动化 + 会话同步视图"
+          icon={<TerminalSquare className="h-5 w-5 text-cyan-300" />}
+        />
 
         {message ? (
           <div
@@ -756,6 +818,12 @@ export const Automation = () => {
               飞书调度
             </h2>
             <div className="flex items-center gap-2">
+              <button
+                onClick={() => setShowFeishuConfigPanel((prev) => !prev)}
+                className="cks-btn cks-btn-secondary cks-focus-ring cks-transition-fast"
+              >
+                {showFeishuConfigPanel ? '收起配置' : '展开配置'}
+              </button>
               <span
                 className={cn(
                   'text-[11px] px-2 py-0.5 rounded-full border',
@@ -769,52 +837,70 @@ export const Automation = () => {
               <button
                 onClick={loadFeishuConfig}
                 disabled={feishuLoading}
-                className="px-3 py-1.5 rounded border border-neutral-700 text-xs text-neutral-300 hover:border-neutral-500 disabled:opacity-50 inline-flex items-center gap-1"
+                className="cks-btn cks-btn-secondary cks-focus-ring cks-transition-fast disabled:opacity-50"
               >
                 <RefreshCw className={`h-3.5 w-3.5 ${feishuLoading ? 'animate-spin' : ''}`} />
                 刷新
               </button>
             </div>
           </div>
+          {showFeishuConfigPanel && (
+            <>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                <input value={feishuConfig.app_id} onChange={(e) => setFeishuConfig((p) => ({ ...p, app_id: e.target.value }))} placeholder="App ID" className="cks-input px-3 py-2" />
+                <input value={feishuConfig.app_secret} onChange={(e) => setFeishuConfig((p) => ({ ...p, app_secret: e.target.value }))} placeholder="App Secret" className="cks-input px-3 py-2" />
+                <input value={feishuConfig.verification_token} onChange={(e) => setFeishuConfig((p) => ({ ...p, verification_token: e.target.value }))} placeholder="Verification Token" className="cks-input px-3 py-2" />
+                <input value={feishuConfig.encrypt_key} onChange={(e) => setFeishuConfig((p) => ({ ...p, encrypt_key: e.target.value }))} placeholder="Encrypt Key" className="cks-input px-3 py-2" />
+                <input value={feishuConfig.allowed_senders} onChange={(e) => setFeishuConfig((p) => ({ ...p, allowed_senders: e.target.value }))} placeholder="允许发送者 open_id（逗号分隔）" className="cks-input px-3 py-2 md:col-span-2" />
+              </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-            <input value={feishuConfig.app_id} onChange={(e) => setFeishuConfig((p) => ({ ...p, app_id: e.target.value }))} placeholder="App ID" className="px-3 py-2 rounded bg-black text-white border border-neutral-800" />
-            <input value={feishuConfig.app_secret} onChange={(e) => setFeishuConfig((p) => ({ ...p, app_secret: e.target.value }))} placeholder="App Secret" className="px-3 py-2 rounded bg-black text-white border border-neutral-800" />
-            <input value={feishuConfig.verification_token} onChange={(e) => setFeishuConfig((p) => ({ ...p, verification_token: e.target.value }))} placeholder="Verification Token" className="px-3 py-2 rounded bg-black text-white border border-neutral-800" />
-            <input value={feishuConfig.encrypt_key} onChange={(e) => setFeishuConfig((p) => ({ ...p, encrypt_key: e.target.value }))} placeholder="Encrypt Key" className="px-3 py-2 rounded bg-black text-white border border-neutral-800" />
-            <input value={feishuConfig.allowed_senders} onChange={(e) => setFeishuConfig((p) => ({ ...p, allowed_senders: e.target.value }))} placeholder="允许发送者 open_id（逗号分隔）" className="px-3 py-2 rounded bg-black text-white border border-neutral-800 md:col-span-2" />
-          </div>
-
-          <div className="flex flex-wrap gap-2">
-            <input
-              value={feishuTestChatId}
-              onChange={(e) => setFeishuTestChatId(e.target.value)}
-              placeholder="测试 Chat ID（可空，仅鉴权）"
-              className="flex-1 min-w-[220px] px-3 py-2 rounded bg-black text-white border border-neutral-800"
-            />
-            <button onClick={handleDiagnoseFeishuConfig} disabled={feishuDiagnosing} className="px-3 py-2 rounded border border-violet-500/40 text-violet-300 hover:bg-violet-500/10 disabled:opacity-50">
-              {feishuDiagnosing ? '诊断中...' : '一键诊断'}
-            </button>
-            <button onClick={handleTestFeishuConfig} disabled={feishuTesting} className="px-3 py-2 rounded border border-cyan-500/40 text-cyan-300 hover:bg-cyan-500/10 disabled:opacity-50">
-              {feishuTesting ? '测试中...' : '测试连通'}
-            </button>
-            <button onClick={handleRunFeishuSmoke} disabled={feishuSmokeRunning} className="px-3 py-2 rounded border border-fuchsia-500/40 text-fuchsia-300 hover:bg-fuchsia-500/10 disabled:opacity-50 inline-flex items-center gap-1">
-              <Play className="h-3.5 w-3.5" />
-              {feishuSmokeRunning ? '联调中...' : '一键联调'}
-            </button>
-            <button onClick={handleSaveFeishuConfig} disabled={feishuSaving} className="px-3 py-2 rounded border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50">
-              {feishuSaving ? '保存中...' : '保存配置'}
-            </button>
-          </div>
+              <div className="flex flex-wrap gap-2">
+                <input
+                  value={feishuTestChatId}
+                  onChange={(e) => setFeishuTestChatId(e.target.value)}
+                  placeholder="测试 Chat ID（可空，仅鉴权）"
+                  className="flex-1 min-w-[220px] cks-input px-3 py-2"
+                />
+                <MoreActions
+                  label="联调工具"
+                  buttonClassName="cks-btn cks-btn-secondary cks-focus-ring cks-transition-fast"
+                  items={[
+                    {
+                      key: 'diagnose',
+                      label: feishuDiagnosing ? '诊断中...' : '一键诊断',
+                      onClick: handleDiagnoseFeishuConfig,
+                      disabled: feishuDiagnosing,
+                    },
+                    {
+                      key: 'test',
+                      label: feishuTesting ? '测试中...' : '测试连通',
+                      onClick: handleTestFeishuConfig,
+                      disabled: feishuTesting,
+                    },
+                    {
+                      key: 'smoke',
+                      label: feishuSmokeRunning ? '联调中...' : '一键联调',
+                      onClick: handleRunFeishuSmoke,
+                      icon: <Play className="h-3.5 w-3.5" />,
+                      disabled: feishuSmokeRunning,
+                    },
+                  ]}
+                />
+                <button onClick={handleSaveFeishuConfig} disabled={feishuSaving} className="cks-btn cks-btn-primary cks-focus-ring cks-transition-fast disabled:opacity-50">
+                  {feishuSaving ? '保存中...' : '保存配置'}
+                </button>
+              </div>
+            </>
+          )}
 
           {feishuSmokeTaskId ? (
             <div className="rounded border border-fuchsia-500/30 bg-fuchsia-500/10 p-2 text-xs text-fuchsia-100">
               联调任务 #{feishuSmokeTaskId} 已创建：
               <div className="mt-2 flex gap-2">
-                <button onClick={() => navigate(`/workbench?channel_task_id=${feishuSmokeTaskId}&from=feishu_smoke`)} className="px-2 py-1 rounded border border-fuchsia-400/50 hover:bg-fuchsia-500/20">
+                <button onClick={() => navigate(`/workbench?channel_task_id=${feishuSmokeTaskId}&from=feishu_smoke`)} className="cks-btn cks-btn-secondary cks-focus-ring cks-transition-fast border-fuchsia-400/50 text-fuchsia-100 hover:bg-fuchsia-500/20">
                   打开工作台
                 </button>
-                <button onClick={() => navigate(`/board?channel_task_id=${feishuSmokeTaskId}&from=feishu_smoke`)} className="px-2 py-1 rounded border border-fuchsia-400/50 hover:bg-fuchsia-500/20">
+                <button onClick={() => navigate(`/board?channel_task_id=${feishuSmokeTaskId}&from=feishu_smoke`)} className="cks-btn cks-btn-secondary cks-focus-ring cks-transition-fast border-fuchsia-400/50 text-fuchsia-100 hover:bg-fuchsia-500/20">
                   打开老板看板
                 </button>
               </div>
@@ -828,7 +914,7 @@ export const Automation = () => {
                   <div className="flex items-center gap-2">
                     <span className="text-neutral-500">事件回调</span>
                     <code className="text-cyan-200 truncate flex-1">{feishuDiagnostics.callback_urls.events}</code>
-                    <button onClick={() => copyText(feishuDiagnostics.callback_urls?.events || '', '事件回调地址')} className="px-2 py-1 rounded border border-neutral-700 text-neutral-200 inline-flex items-center gap-1">
+                    <button onClick={() => copyText(feishuDiagnostics.callback_urls?.events || '', '事件回调地址')} className="cks-btn cks-btn-secondary cks-focus-ring cks-transition-fast">
                       {lastCopiedText === feishuDiagnostics.callback_urls.events ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
                       {lastCopiedText === feishuDiagnostics.callback_urls.events ? '已复制' : '复制'}
                     </button>
@@ -854,7 +940,7 @@ export const Automation = () => {
               <button
                 onClick={loadFeishuRecords}
                 disabled={feishuRecordsLoading}
-                className="px-3 py-1.5 rounded border border-neutral-700 text-xs text-neutral-300 hover:border-neutral-500 disabled:opacity-50 inline-flex items-center gap-1"
+                className="cks-btn cks-btn-secondary cks-focus-ring cks-transition-fast disabled:opacity-50"
               >
                 <RefreshCw className={`h-3.5 w-3.5 ${feishuRecordsLoading ? 'animate-spin' : ''}`} />
                 刷新记录
@@ -866,7 +952,7 @@ export const Automation = () => {
             <select
               value={feishuOwnerFilter}
               onChange={(e) => setFeishuOwnerFilter(e.target.value || 'all')}
-              className="px-2 py-1 rounded bg-black text-white border border-neutral-800 text-xs"
+              className="cks-select px-2 py-1 text-xs"
             >
               <option value="all">全部负责人</option>
               {feishuOwnerOptions.map((owner) => (
@@ -893,7 +979,7 @@ export const Automation = () => {
                 }
                 setFeishuStatusFilter('all')
               }}
-              className="px-2 py-1 rounded bg-black text-white border border-neutral-800 text-xs"
+              className="cks-select px-2 py-1 text-xs"
             >
               <option value="all">全部状态</option>
               <option value="pending">待执行</option>
@@ -917,9 +1003,14 @@ export const Automation = () => {
                   <div className="flex items-center justify-between text-xs">
                     <span className="text-neutral-300">会话：{conv.chatId} · 负责人：{conv.owner}</span>
                     <div className="flex items-center gap-2">
-                      <span className="px-2 py-0.5 rounded border border-neutral-700 text-neutral-300">
-                        {statusLabelMap[conv.latestStatus] || conv.latestStatus}
+                      <span className={cn('px-2 py-0.5 rounded border', getTaskStatusMeta(conv.latestStatus).badgeClassName)}>
+                        {getTaskStatusMeta(conv.latestStatus).label}
                       </span>
+                      {conv.executionNodeId ? (
+                        <span className="px-2 py-0.5 rounded border border-indigo-500/40 bg-indigo-500/10 text-indigo-200">
+                          节点 {conv.executionNodeId}
+                        </span>
+                      ) : null}
                       {conv.unread ? (
                         <span className="px-2 py-0.5 rounded border border-fuchsia-500/50 bg-fuchsia-500/10 text-fuchsia-200">
                           新进展
@@ -946,27 +1037,27 @@ export const Automation = () => {
                           markConversationSeen(conv.chatId, conv.latestId)
                         }
                       }}
-                      className="px-2 py-1 rounded border border-cyan-500/40 text-cyan-200 hover:bg-cyan-500/10 text-xs"
+                      className="cks-btn cks-btn-primary"
                     >
                       回放到工作台
                     </button>
                     <button
                       onClick={() => navigate(`/board?assignee=${encodeURIComponent(conv.owner)}&from=feishu_chat`)}
-                      className="px-2 py-1 rounded border border-blue-500/40 text-blue-200 hover:bg-blue-500/10 text-xs"
+                      className="cks-btn cks-btn-secondary border-blue-500/40 text-blue-200 hover:bg-blue-500/10"
                     >
                       跳转老板看板
                     </button>
                     {conv.goalTaskId ? (
                       <button
                         onClick={() => navigate(`/goals?task_id=${conv.goalTaskId}&from=feishu_chat`)}
-                        className="px-2 py-1 rounded border border-cyan-500/40 text-cyan-200 hover:bg-cyan-500/10 text-xs"
+                        className="cks-btn cks-btn-primary"
                       >
                         跳转目标任务
                       </button>
                     ) : null}
                     <button
                       onClick={() => markConversationSeen(conv.chatId, conv.latestId)}
-                      className="px-2 py-1 rounded border border-neutral-700 text-neutral-300 hover:border-neutral-500 text-xs"
+                      className="cks-btn cks-btn-secondary"
                     >
                       标记已读
                     </button>
@@ -974,13 +1065,13 @@ export const Automation = () => {
                       <>
                         <button
                           onClick={() => handleControlChannelTask(conv.latestId, 'pause')}
-                          className="px-2 py-1 rounded border border-amber-500/40 text-amber-200 hover:bg-amber-500/10 text-xs"
+                          className="cks-btn cks-btn-secondary border-amber-500/40 text-amber-200 hover:bg-amber-500/10"
                         >
                           暂停任务
                         </button>
                         <button
                           onClick={() => handleControlChannelTask(conv.latestId, 'cancel')}
-                          className="px-2 py-1 rounded border border-rose-500/40 text-rose-200 hover:bg-rose-500/10 text-xs"
+                          className="cks-btn cks-btn-danger border-rose-500/40 text-rose-200 hover:bg-rose-500/10"
                         >
                           取消任务
                         </button>
@@ -989,7 +1080,7 @@ export const Automation = () => {
                     {conv.latestStatus === 'paused' ? (
                       <button
                         onClick={() => handleControlChannelTask(conv.latestId, 'resume')}
-                        className="px-2 py-1 rounded border border-emerald-500/40 text-emerald-200 hover:bg-emerald-500/10 text-xs"
+                        className="cks-btn cks-btn-secondary border-emerald-500/40 text-emerald-200 hover:bg-emerald-500/10"
                       >
                         恢复执行
                       </button>
@@ -998,13 +1089,13 @@ export const Automation = () => {
                       <>
                         <button
                           onClick={() => handleControlChannelTask(conv.latestId, 'resume')}
-                          className="px-2 py-1 rounded border border-emerald-500/40 text-emerald-200 hover:bg-emerald-500/10 text-xs"
+                          className="cks-btn cks-btn-primary cks-focus-ring cks-transition-fast"
                         >
                           审批后重试
                         </button>
                         <button
                           onClick={() => handleControlChannelTask(conv.latestId, 'cancel')}
-                          className="px-2 py-1 rounded border border-rose-500/40 text-rose-200 hover:bg-rose-500/10 text-xs"
+                          className="cks-btn cks-btn-danger cks-focus-ring cks-transition-fast"
                         >
                           取消任务
                         </button>
@@ -1013,7 +1104,7 @@ export const Automation = () => {
                     {conv.latestStatus === 'failed' || conv.latestStatus === 'canceled' ? (
                       <button
                         onClick={() => handleControlChannelTask(conv.latestId, 'retry')}
-                        className="px-2 py-1 rounded border border-emerald-500/40 text-emerald-200 hover:bg-emerald-500/10 text-xs"
+                        className="cks-btn cks-btn-primary cks-focus-ring cks-transition-fast"
                       >
                         重试任务
                       </button>
@@ -1021,9 +1112,12 @@ export const Automation = () => {
                   </div>
                   <div className="space-y-2 max-h-56 overflow-auto">
                     {conv.rows.map((row) => {
-                      const normalizedStatus = normalizeTaskStatus(row.status || '')
+                      const normalizedStatus = normalizeTaskStatusKey(row.status || '')
                       const reply = row.result && typeof row.result === 'object'
                         ? String((row.result as Record<string, unknown>).reply || (row.result as Record<string, unknown>).message || '')
+                        : ''
+                      const rowExecutionNodeId = row.result && typeof row.result === 'object'
+                        ? String((row.result as Record<string, unknown>).execution_node_id || '').trim()
                         : ''
                       return (
                         <div key={row.id} className="space-y-1 text-xs">
@@ -1036,9 +1130,14 @@ export const Automation = () => {
                             </div>
                           ) : (
                             <div className="rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-neutral-400">
-                              CKS 状态：{statusLabelMap[normalizedStatus] || normalizedStatus}
+                              CKS 状态：{getTaskStatusMeta(normalizedStatus).label}
                             </div>
                           )}
+                          {rowExecutionNodeId ? (
+                            <div className="rounded border border-indigo-500/30 bg-indigo-500/10 px-2 py-1 text-indigo-100">
+                              执行节点：{rowExecutionNodeId}
+                            </div>
+                          ) : null}
                         </div>
                       )
                     })}
@@ -1057,11 +1156,80 @@ export const Automation = () => {
           <p className="text-xs text-neutral-400">验证 openclaw 风格电脑自动化：开应用、输文本、发快捷键。</p>
 
           <div className="flex flex-wrap items-center gap-2">
-            <button onClick={handleDetectPlatform} disabled={desktopBusy} className="px-3 py-2 rounded border border-cyan-500/40 text-cyan-300 hover:bg-cyan-500/10 disabled:opacity-50">
+            <button onClick={handleDetectPlatform} disabled={desktopBusy} className="cks-btn cks-btn-secondary cks-focus-ring cks-transition-fast disabled:opacity-50">
               检测平台
+            </button>
+            <button onClick={loadNodes} disabled={nodesLoading} className="cks-btn cks-btn-secondary cks-focus-ring cks-transition-fast disabled:opacity-50">
+              <RefreshCw className={cn('h-3.5 w-3.5', nodesLoading ? 'animate-spin' : '')} />
+              刷新节点
             </button>
             {platformInfo ? <span className="text-xs text-neutral-300">{platformInfo.os} / {platformInfo.arch}</span> : null}
             {platformHint ? <span className="text-xs text-neutral-500">{platformHint}</span> : null}
+          </div>
+
+          <div className="rounded border border-neutral-800 bg-black/30 p-3 space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs text-neutral-400">执行节点（组织：{organizationId}）</span>
+              <select
+                value={nodeCapabilityFilter}
+                onChange={(e) => setNodeCapabilityFilter(e.target.value)}
+                className="cks-select px-2 py-1 text-xs"
+              >
+                <option value="all">全部能力</option>
+                {capabilityOptions.map((cap) => (
+                  <option key={cap} value={cap}>{cap}</option>
+                ))}
+              </select>
+              <span className="text-xs text-neutral-500">在线/繁忙/离线：{nodes.length}</span>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs text-neutral-500">自动调度能力：</span>
+              <select
+                value={nodeSelectCapability}
+                onChange={(e) => setNodeSelectCapability(e.target.value)}
+                className="cks-select px-2 py-1 text-xs"
+              >
+                <option value="desktop">desktop</option>
+                <option value="terminal">terminal</option>
+                <option value="vision">vision</option>
+                <option value="all">all</option>
+              </select>
+              <button
+                onClick={handleSelectNode}
+                disabled={nodeSelecting}
+                className="cks-btn cks-btn-primary cks-focus-ring cks-transition-fast disabled:opacity-50"
+              >
+                {nodeSelecting ? '选择中...' : '自动选择节点'}
+              </button>
+              {selectedNode ? (
+                <span className="text-xs text-emerald-300">
+                  当前节点：{selectedNode.display_name || selectedNode.node_id}
+                </span>
+              ) : null}
+            </div>
+            {nodesLoading ? (
+              <p className="text-xs text-neutral-500">正在加载节点...</p>
+            ) : visibleNodes.length === 0 ? (
+              <p className="text-xs text-neutral-500">暂无节点，可通过 /nodes/register 注册 Windows/macOS 执行节点。</p>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                {visibleNodes.slice(0, 6).map((item) => (
+                  <div key={item.node_id} className="rounded border border-neutral-800 bg-neutral-950/70 p-2 text-xs space-y-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-neutral-200 truncate">{item.display_name || item.node_id}</span>
+                      <span className={cn('px-1.5 py-0.5 rounded border', getNodeStatusMeta(item.status || '').badgeClassName)}>
+                        {getNodeStatusMeta(item.status || '').label}
+                      </span>
+                    </div>
+                    <div className="text-neutral-500">{item.os || '-'} / {item.arch || '-'}</div>
+                    <div className="text-neutral-500 truncate">{item.host || '-'}</div>
+                    <div className="text-cyan-300 truncate">
+                      能力：{(item.capabilities || []).length ? (item.capabilities || []).join('、') : '-'}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
@@ -1069,9 +1237,9 @@ export const Automation = () => {
               value={desktopAppName}
               onChange={(e) => setDesktopAppName(e.target.value)}
               placeholder="应用名（如 notepad / TextEdit）"
-              className="px-3 py-2 rounded bg-black text-white border border-neutral-800"
+              className="cks-input px-3 py-2"
             />
-            <button onClick={handleOpenApplication} disabled={desktopBusy} className="px-3 py-2 rounded border border-blue-500/40 text-blue-300 hover:bg-blue-500/10 disabled:opacity-50 inline-flex items-center justify-center gap-1">
+            <button onClick={handleOpenApplication} disabled={desktopBusy} className="cks-btn cks-btn-primary cks-focus-ring cks-transition-fast disabled:opacity-50">
               <Play className="h-3.5 w-3.5" />
               打开应用
             </button>
@@ -1079,13 +1247,13 @@ export const Automation = () => {
               value={desktopTargetApp}
               onChange={(e) => setDesktopTargetApp(e.target.value)}
               placeholder="目标应用（可选，输入/快捷键前激活）"
-              className="px-3 py-2 rounded bg-black text-white border border-neutral-800"
+              className="cks-input px-3 py-2"
             />
             <input
               value={desktopHotkey}
               onChange={(e) => setDesktopHotkey(e.target.value)}
               placeholder="快捷键（如 ctrl+s / cmd+v）"
-              className="px-3 py-2 rounded bg-black text-white border border-neutral-800"
+              className="cks-input px-3 py-2"
             />
           </div>
 
@@ -1094,15 +1262,15 @@ export const Automation = () => {
             onChange={(e) => setDesktopText(e.target.value)}
             rows={4}
             placeholder="要输入的文本内容"
-            className="w-full px-3 py-2 rounded bg-black text-white border border-neutral-800"
+            className="w-full cks-input px-3 py-2"
           />
 
           <div className="flex flex-wrap gap-2">
-            <button onClick={handleTypeText} disabled={desktopBusy} className="px-3 py-2 rounded border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50 inline-flex items-center gap-1">
+            <button onClick={handleTypeText} disabled={desktopBusy} className="cks-btn cks-btn-primary cks-focus-ring cks-transition-fast disabled:opacity-50">
               <Send className="h-3.5 w-3.5" />
               输入文本
             </button>
-            <button onClick={handlePressHotkey} disabled={desktopBusy} className="px-3 py-2 rounded border border-purple-500/40 text-purple-300 hover:bg-purple-500/10 disabled:opacity-50">
+            <button onClick={handlePressHotkey} disabled={desktopBusy} className="cks-btn cks-btn-secondary cks-focus-ring cks-transition-fast disabled:opacity-50">
               发送快捷键
             </button>
           </div>
@@ -1119,14 +1287,14 @@ export const Automation = () => {
             value={visualGoal}
             onChange={(e) => setVisualGoal(e.target.value)}
             placeholder="输入目标，例如：打开浏览器搜索 AI 工作台并打开第一条结果"
-            className="w-full px-3 py-2 rounded bg-black text-white border border-neutral-800"
+            className="w-full cks-input px-3 py-2"
           />
           <textarea
             value={visualHistory}
             onChange={(e) => setVisualHistory(e.target.value)}
             rows={3}
             placeholder="可选：执行历史/失败信息，帮助视觉模型纠错"
-            className="w-full px-3 py-2 rounded bg-black text-white border border-neutral-800"
+            className="w-full cks-input px-3 py-2"
           />
           <div className="flex items-center gap-2">
             <span className="text-xs text-neutral-500">最多步数</span>
@@ -1136,19 +1304,19 @@ export const Automation = () => {
               min={1}
               max={8}
               onChange={(e) => setVisualMaxSteps(Number(e.target.value || 3))}
-              className="w-24 px-2 py-1 rounded bg-black text-white border border-neutral-800 text-sm"
+              className="cks-input w-24 px-2 py-1 text-sm"
             />
             <button
               onClick={handleRunVisualLoop}
               disabled={visualRunning}
-              className="px-3 py-2 rounded border border-fuchsia-500/40 text-fuchsia-300 hover:bg-fuchsia-500/10 disabled:opacity-50"
+              className="cks-btn cks-btn-secondary border-fuchsia-500/40 text-fuchsia-300 hover:bg-fuchsia-500/10 disabled:opacity-50"
             >
               {visualRunning ? '执行中...' : '开始视觉循环'}
             </button>
             {visualRunning ? (
               <button
                 onClick={handleStopVisualLoop}
-                className="px-3 py-2 rounded border border-amber-500/40 text-amber-300 hover:bg-amber-500/10"
+                className="cks-btn cks-btn-secondary border-amber-500/40 text-amber-300 hover:bg-amber-500/10"
               >
                 停止循环
               </button>
@@ -1163,7 +1331,7 @@ export const Automation = () => {
                 <span className="px-2 py-0.5 rounded border border-cyan-500/30 bg-cyan-500/10 text-cyan-200">进行中 {visualSummary.running}</span>
                 <button
                   onClick={handleCopyVisualLogs}
-                  className="ml-auto inline-flex items-center gap-1 px-2 py-1 rounded border border-neutral-700 hover:border-neutral-500 hover:bg-neutral-900"
+                  className="ml-auto cks-btn cks-btn-secondary"
                 >
                   <Copy className="h-3 w-3" />
                   复制日志
@@ -1199,7 +1367,7 @@ export const Automation = () => {
           {!visualRunning && lastFailedPlan ? (
             <button
               onClick={handleRetryFailedStep}
-              className="px-3 py-2 rounded border border-amber-500/40 text-amber-300 hover:bg-amber-500/10 inline-flex items-center gap-1"
+              className="cks-btn cks-btn-secondary border-amber-500/40 text-amber-300 hover:bg-amber-500/10 inline-flex items-center gap-1"
             >
               <AlertTriangle className="h-3.5 w-3.5" />
               重试失败步骤（第 {lastFailedPlan.step} 步）
@@ -1208,7 +1376,7 @@ export const Automation = () => {
           {!visualRunning && visualNeedsTakeover ? (
             <button
               onClick={handleTakeoverToWorkbench}
-              className="px-3 py-2 rounded border border-cyan-500/40 text-cyan-300 hover:bg-cyan-500/10"
+              className="cks-btn cks-btn-primary"
             >
               转到工作台接管任务
             </button>

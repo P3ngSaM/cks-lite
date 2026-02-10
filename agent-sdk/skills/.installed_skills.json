@@ -89,5 +89,19 @@
     "path": "skills/pptx",
     "installed_at": "2026-02-08T12:23:30.844440",
     "github_url": "https://github.com/anthropics/skills"
+  },
+  "tavily-search": {
+    "owner": "clawdbot",
+    "repo": "skills",
+    "path": "skills/arun-8687/tavily-search",
+    "installed_at": "2026-02-09T20:44:58.608335",
+    "github_url": "https://github.com/clawdbot/skills"
+  },
+  "proactive-agent-1-2-4": {
+    "owner": "clawdbot",
+    "repo": "skills",
+    "path": "skills/bodii88/proactive-agent-1-2-4",
+    "installed_at": "2026-02-09T20:44:58.608335",
+    "github_url": "https://github.com/clawdbot/skills"
   }
 }

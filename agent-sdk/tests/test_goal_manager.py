@@ -60,6 +60,30 @@ class GoalManagerTest(unittest.TestCase):
         rows_after = self.manager.list_tasks(from_time=from_time)
         self.assertGreaterEqual(len(rows_after), 1)
 
+    def test_list_tasks_time_filter_accepts_utc_z(self):
+        kpi_id = self.manager.create_kpi("k")
+        okr_id = self.manager.create_okr(kpi_id, "o")
+        project_id = self.manager.create_project(okr_id, "p")
+        task_id = self.manager.create_task(project_id, "t1", assignee="alice")
+        row = self.manager.list_tasks(task_id=task_id)[0]
+
+        # Simulate frontend/browser ISO UTC format (with trailing Z)
+        from_time = row["updated_at"] + "Z"
+        rows = self.manager.list_tasks(from_time=from_time)
+        self.assertIsInstance(rows, list)
+
+    def test_list_tasks_time_filter_accepts_offset_timezone(self):
+        kpi_id = self.manager.create_kpi("k")
+        okr_id = self.manager.create_okr(kpi_id, "o")
+        project_id = self.manager.create_project(okr_id, "p")
+        task_id = self.manager.create_task(project_id, "t1", assignee="alice")
+        row = self.manager.list_tasks(task_id=task_id)[0]
+
+        # Typical frontend/local timezone with offset.
+        from_time = row["updated_at"] + "+08:00"
+        rows = self.manager.list_tasks(from_time=from_time)
+        self.assertIsInstance(rows, list)
+
     def test_list_tasks_filter_by_task_id(self):
         kpi_id = self.manager.create_kpi("k")
         okr_id = self.manager.create_okr(kpi_id, "o")
@@ -285,6 +309,198 @@ class GoalManagerTest(unittest.TestCase):
         accepted = self.manager.list_tasks(task_id=task_id)[0]
         self.assertEqual(accepted["handoff_status"], "resolved")
         self.assertTrue(accepted["handoff_resolved_at"])
+
+    def test_ai_employee_and_skill_preset_crud_isolated_by_organization(self):
+        self.assertTrue(
+            self.manager.upsert_ai_employee(
+                name="Nova",
+                role="frontend",
+                specialty="ui delivery",
+                primary_skill="playwright",
+                skill_stack=["playwright", "screenshot"],
+                organization_id="org-a",
+            )
+        )
+        self.assertTrue(
+            self.manager.upsert_ai_employee(
+                name="Echo",
+                role="backend",
+                specialty="api",
+                primary_skill="openai-docs",
+                skill_stack=["openai-docs"],
+                organization_id="org-b",
+            )
+        )
+
+        rows_a = self.manager.list_ai_employees("org-a")
+        rows_b = self.manager.list_ai_employees("org-b")
+        self.assertEqual(len(rows_a), 1)
+        self.assertEqual(rows_a[0]["name"], "Nova")
+        self.assertEqual(rows_a[0]["skill_stack"], ["playwright", "screenshot"])
+        self.assertEqual(len(rows_b), 1)
+        self.assertEqual(rows_b[0]["name"], "Echo")
+
+        self.assertTrue(
+            self.manager.upsert_skill_preset(
+                preset_id="writer",
+                name="写作套件",
+                primary_skill="internal-comms",
+                skills=["internal-comms", "find-skills"],
+                organization_id="org-a",
+            )
+        )
+        self.assertFalse(
+            self.manager.upsert_skill_preset(
+                preset_id="",
+                name="bad",
+                primary_skill="internal-comms",
+                organization_id="org-a",
+            )
+        )
+        presets_a = self.manager.list_skill_presets("org-a")
+        presets_b = self.manager.list_skill_presets("org-b")
+        self.assertEqual(len(presets_a), 1)
+        self.assertEqual(presets_a[0]["id"], "writer")
+        self.assertEqual(len(presets_b), 0)
+        self.assertTrue(self.manager.delete_skill_preset("writer", "org-a"))
+        self.assertEqual(len(self.manager.list_skill_presets("org-a")), 0)
+
+        self.assertTrue(self.manager.delete_ai_employee("Nova", "org-a"))
+        self.assertEqual(len(self.manager.list_ai_employees("org-a")), 0)
+
+    def test_task_agent_profile_roundtrip(self):
+        kpi_id = self.manager.create_kpi("k", organization_id="org-a")
+        okr_id = self.manager.create_okr(kpi_id, "o")
+        project_id = self.manager.create_project(okr_id, "p")
+        task_id = self.manager.create_task(project_id, "task-1", assignee="Nova")
+
+        self.assertTrue(
+            self.manager.upsert_task_agent_profile(
+                task_id=task_id,
+                organization_id="org-a",
+                assignee="Nova",
+                role="frontend",
+                specialty="ui",
+                preferred_skill="playwright",
+                skill_stack=["playwright", "screenshot"],
+                skill_strict=True,
+                seed_prompt="focus on stable ui delivery",
+            )
+        )
+        profile = self.manager.get_task_agent_profile(task_id, "org-a")
+        self.assertIsNotNone(profile)
+        assert profile is not None
+        self.assertEqual(profile["assignee"], "Nova")
+        self.assertEqual(profile["preferred_skill"], "playwright")
+        self.assertEqual(profile["skill_stack"], ["playwright", "screenshot"])
+        self.assertTrue(profile["skill_strict"])
+
+        self.assertIsNone(self.manager.get_task_agent_profile(task_id, "org-b"))
+        self.assertFalse(
+            self.manager.upsert_task_agent_profile(
+                task_id=9999,
+                organization_id="org-a",
+                preferred_skill="playwright",
+            )
+        )
+
+    def test_supervisor_dispatch_skips_paused_assignee(self):
+        kpi_id = self.manager.create_kpi("k", organization_id="org-a")
+        okr_id = self.manager.create_okr(kpi_id, "o")
+        project_id = self.manager.create_project(okr_id, "p")
+        task_nova = self.manager.create_task(project_id, "t-nova", assignee="Nova")
+        task_echo = self.manager.create_task(project_id, "t-echo", assignee="Echo")
+
+        self.assertTrue(
+            self.manager.upsert_ai_employee(
+                name="Nova",
+                primary_skill="playwright",
+                skill_stack=["playwright"],
+                status="paused",
+                organization_id="org-a",
+            )
+        )
+        self.assertTrue(
+            self.manager.upsert_ai_employee(
+                name="Echo",
+                primary_skill="openai-docs",
+                skill_stack=["openai-docs"],
+                status="active",
+                organization_id="org-a",
+            )
+        )
+
+        report = self.manager.run_supervisor_dispatch(organization_id="org-a", max_assignees=5)
+        self.assertEqual(report["skipped_paused"], 1)
+        self.assertEqual(report["total"], 1)
+        self.assertEqual(report["dispatched"][0]["assignee"], "Echo")
+        self.assertEqual(report["dispatched"][0]["task_id"], task_echo)
+        dispatched_ids = {item["task_id"] for item in report["dispatched"]}
+        self.assertNotIn(task_nova, dispatched_ids)
+
+        dashboard = self.manager.get_dashboard_data("org-a")
+        owner_rows = {row["assignee"]: row for row in dashboard["owners"]}
+        self.assertEqual(owner_rows["Echo"]["next_task_id"], task_echo)
+
+    def test_supervisor_review_report_contains_scores(self):
+        kpi_id = self.manager.create_kpi("k")
+        okr_id = self.manager.create_okr(kpi_id, "o")
+        project_id = self.manager.create_project(okr_id, "p")
+        t1 = self.manager.create_task(project_id, "done-accepted", assignee="Nova")
+        t2 = self.manager.create_task(project_id, "done-pending", assignee="Nova")
+        t3 = self.manager.create_task(project_id, "rejected", assignee="Echo")
+        self.manager.complete_task(t1)
+        self.manager.complete_task(t2)
+        self.manager.complete_task(t3)
+        self.manager.review_task(t1, "accept", "ok", "lead")
+        self.manager.review_task(t3, "reject", "need fix", "lead")
+
+        report = self.manager.run_supervisor_review(window_days=7)
+        self.assertGreaterEqual(report["overall_score"], 0)
+        self.assertLessEqual(report["overall_score"], 100)
+        self.assertGreaterEqual(report["total_assignees"], 2)
+        items = {item["assignee"]: item for item in report["items"]}
+        self.assertIn("Nova", items)
+        self.assertIn("Echo", items)
+        self.assertEqual(items["Nova"]["accepted"], 1)
+        self.assertEqual(items["Nova"]["pending_review"], 1)
+        self.assertEqual(items["Echo"]["rejected"], 1)
+        self.assertLess(items["Echo"]["score"], items["Nova"]["score"])
+
+    def test_bootstrap_one_person_company_demo_creates_records(self):
+        report = self.manager.bootstrap_one_person_company_demo(
+            organization_id="org-demo",
+            owner_name="Sam",
+            reset_existing=True,
+        )
+        self.assertEqual(report["organization_id"], "org-demo")
+        self.assertEqual(report["employees"], 5)
+        self.assertEqual(report["presets"], 3)
+        self.assertEqual(report["tasks_created"], 4)
+
+        dashboard = self.manager.get_dashboard_data("org-demo")
+        self.assertGreaterEqual(dashboard["summary"]["total_tasks"], 4)
+        assignees = {row["assignee"] for row in dashboard["owners"]}
+        self.assertIn("Noah-前端工程师", assignees)
+        self.assertIn("Mia-运营专员", assignees)
+        self.assertEqual(len(self.manager.list_ai_employees("org-demo")), 5)
+        self.assertEqual(len(self.manager.list_skill_presets("org-demo")), 3)
+
+    def test_bootstrap_reset_existing_clears_old_records(self):
+        kpi_id = self.manager.create_kpi("legacy-kpi", organization_id="org-demo")
+        okr_id = self.manager.create_okr(kpi_id, "legacy-okr")
+        project_id = self.manager.create_project(okr_id, "legacy-project")
+        self.manager.create_task(project_id, "legacy-task", assignee="legacy")
+
+        report = self.manager.bootstrap_one_person_company_demo(
+            organization_id="org-demo",
+            owner_name="Sam",
+            reset_existing=True,
+        )
+        self.assertEqual(report["tasks_created"], 4)
+        tasks = self.manager.list_tasks(organization_id="org-demo", limit=100)
+        titles = {row["title"] for row in tasks}
+        self.assertNotIn("legacy-task", titles)
 
 
 if __name__ == "__main__":

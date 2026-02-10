@@ -22,6 +22,8 @@ import type {
   FeishuConfigResult,
   FeishuConfigTestResult,
   FeishuDiagnoseResult,
+  StartupProfileResult,
+  AutonomyEventsResult,
   ChannelTaskResult,
   ChannelTaskListResult,
   AuditRecordsResult,
@@ -31,7 +33,18 @@ import type {
   GoalActionResult,
   GoalTaskListResult,
   GoalTaskExecutionResult,
+  GoalTaskExecutionReadinessResult,
+  GoalTaskAgentProfileResult,
   GoalsDashboardResult,
+  GoalSupervisorDispatchResult,
+  GoalSupervisorReviewResult,
+  GoalSubagentRunResult,
+  GoalSubagentRunListResult,
+  GoalSubagentRunEventsResult,
+  AiEmployeeListResult,
+  AiSkillPresetListResult,
+  AgentNodeListResult,
+  AgentNodeResult,
 } from '../types/agent'
 import { withRetry, type RetryConfig } from '../utils/errorHandler'
 
@@ -241,6 +254,48 @@ export class AgentService {
       },
       this.readRetryConfig,
       'Search Memories'
+    )
+  }
+
+  /**
+   * Get backend startup profile diagnostics
+   */
+  static async getStartupProfile(): Promise<StartupProfileResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(`${this.baseURL}/debug/startup-profile`, {}, 5000)
+        if (!response.ok) {
+          throw new Error(`Startup profile failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.readRetryConfig,
+      'Startup Profile'
+    )
+  }
+
+  static async listAutonomyEvents(params?: {
+    session_id?: string
+    goal_task_id?: number
+    stage?: string
+    limit?: number
+  }): Promise<AutonomyEventsResult | null> {
+    return withRetry(
+      async () => {
+        const query = new URLSearchParams()
+        if (params?.session_id) query.set('session_id', params.session_id)
+        if (typeof params?.goal_task_id === 'number') query.set('goal_task_id', String(params.goal_task_id))
+        if (params?.stage) query.set('stage', params.stage)
+        if (typeof params?.limit === 'number') query.set('limit', String(params.limit))
+        const suffix = query.toString() ? `?${query.toString()}` : ''
+        const response = await this.fetchWithTimeout(`${this.baseURL}/autonomy/events${suffix}`, {}, 5000)
+        if (!response.ok) {
+          throw new Error(`Autonomy events failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.readRetryConfig,
+      'List Autonomy Events'
     )
   }
 
@@ -893,6 +948,25 @@ export class AgentService {
   }
 
   /**
+   * Get persisted execution events for a task (phase transitions, resume traces)
+   */
+  static async getGoalTaskExecutionEvents(taskId: number, limit: number = 50): Promise<AuditRecordsResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/goals/task/${taskId}/execution/events?limit=${limit}`
+        )
+        if (!response.ok) {
+          throw new Error(`Get task execution events failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.readRetryConfig,
+      'Get Goal Task Execution Events'
+    )
+  }
+
+  /**
    * Update execution phase state for a task
    */
   static async updateGoalTaskExecutionState(
@@ -958,6 +1032,89 @@ export class AgentService {
     )
   }
 
+  static async getGoalTaskExecutionReadiness(
+    taskId: number,
+    organizationId?: string
+  ): Promise<GoalTaskExecutionReadinessResult | null> {
+    return withRetry(
+      async () => {
+        const params = new URLSearchParams()
+        if (organizationId) params.append('organization_id', organizationId)
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/goals/task/${taskId}/execution/readiness?${params.toString()}`
+        )
+        if (!response.ok) {
+          throw new Error(`Get task execution readiness failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.readRetryConfig,
+      'Get Goal Task Execution Readiness'
+    )
+  }
+
+  static async getGoalTaskAgentProfile(taskId: number, organizationId?: string): Promise<GoalTaskAgentProfileResult | null> {
+    return withRetry(
+      async () => {
+        const params = new URLSearchParams()
+        if (organizationId) params.append('organization_id', organizationId)
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/goals/task/${taskId}/agent-profile?${params.toString()}`
+        )
+        if (!response.ok) {
+          throw new Error(`Get goal task agent profile failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.readRetryConfig,
+      'Get Goal Task Agent Profile'
+    )
+  }
+
+  static async upsertGoalTaskAgentProfile(
+    taskId: number,
+    request: {
+      organizationId?: string
+      assignee?: string
+      role?: string
+      specialty?: string
+      preferredSkill?: string
+      skillStack?: string[]
+      skillStrict?: boolean
+      seedPrompt?: string
+    }
+  ): Promise<GoalTaskAgentProfileResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/goals/task/${taskId}/agent-profile/upsert`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              organization_id: request.organizationId,
+              assignee: request.assignee || '',
+              role: request.role || '',
+              specialty: request.specialty || '',
+              preferred_skill: request.preferredSkill || '',
+              skill_stack: request.skillStack || [],
+              skill_strict: Boolean(request.skillStrict),
+              seed_prompt: request.seedPrompt || '',
+            }),
+          }
+        )
+        if (!response.ok) {
+          throw new Error(`Upsert goal task agent profile failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Upsert Goal Task Agent Profile'
+    )
+  }
+
   /**
    * Get manager dashboard summary and owner list
    */
@@ -1020,6 +1177,465 @@ export class AgentService {
       },
       this.writeRetryConfig,
       'Set Dashboard Next Task'
+    )
+  }
+
+  static async runSupervisorDispatch(request: {
+    organizationId?: string
+    objective?: string
+    maxAssignees?: number
+    preferPendingReview?: boolean
+    supervisorName?: string
+  }): Promise<GoalSupervisorDispatchResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/goals/supervisor/dispatch`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              organization_id: request.organizationId,
+              objective: request.objective || '',
+              max_assignees: request.maxAssignees ?? 8,
+              prefer_pending_review: request.preferPendingReview ?? true,
+              supervisor_name: request.supervisorName || 'Supervisor-Agent',
+            }),
+          }
+        )
+        if (!response.ok) {
+          throw new Error(`Run supervisor dispatch failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Run Supervisor Dispatch'
+    )
+  }
+
+  static async runSupervisorReview(request: {
+    organizationId?: string
+    windowDays?: number
+    supervisorName?: string
+  }): Promise<GoalSupervisorReviewResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/goals/supervisor/review`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              organization_id: request.organizationId,
+              window_days: request.windowDays ?? 7,
+              supervisor_name: request.supervisorName || 'Supervisor-Agent',
+            }),
+          }
+        )
+        if (!response.ok) {
+          throw new Error(`Run supervisor review failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Run Supervisor Review'
+    )
+  }
+
+  static async spawnTaskSubagentRun(
+    taskId: number,
+    request?: {
+      organizationId?: string
+      objective?: string
+      supervisorName?: string
+      sessionId?: string
+      nodeId?: string
+      autoComplete?: boolean
+    }
+  ): Promise<GoalSubagentRunResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/goals/task/${taskId}/subagent-runs/spawn`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              organization_id: request?.organizationId,
+              objective: request?.objective || '',
+              supervisor_name: request?.supervisorName || 'Supervisor-Agent',
+              session_id: request?.sessionId || '',
+              node_id: request?.nodeId || '',
+              auto_complete: Boolean(request?.autoComplete),
+            }),
+          }
+        )
+        if (!response.ok) {
+          throw new Error(`Spawn subagent run failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Spawn Task Subagent Run'
+    )
+  }
+
+  static async listTaskSubagentRuns(
+    taskId: number,
+    organizationId?: string,
+    limit: number = 30
+  ): Promise<GoalSubagentRunListResult | null> {
+    return withRetry(
+      async () => {
+        const params = new URLSearchParams()
+        if (organizationId) params.append('organization_id', organizationId)
+        params.append('limit', String(limit))
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/goals/task/${taskId}/subagent-runs?${params.toString()}`
+        )
+        if (!response.ok) {
+          throw new Error(`List task subagent runs failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.readRetryConfig,
+      'List Task Subagent Runs'
+    )
+  }
+
+  static async getSubagentRun(runId: string): Promise<GoalSubagentRunResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(`${this.baseURL}/goals/subagent-runs/${encodeURIComponent(runId)}`)
+        if (!response.ok) {
+          throw new Error(`Get subagent run failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.readRetryConfig,
+      'Get Subagent Run'
+    )
+  }
+
+  static async listSubagentRunEvents(runId: string, limit: number = 120): Promise<GoalSubagentRunEventsResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/goals/subagent-runs/${encodeURIComponent(runId)}/events?limit=${encodeURIComponent(String(limit))}`
+        )
+        if (!response.ok) {
+          throw new Error(`List subagent run events failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.readRetryConfig,
+      'List Subagent Run Events'
+    )
+  }
+
+  static async cancelSubagentRun(runId: string, reason: string = ''): Promise<GoalSubagentRunResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/goals/subagent-runs/${encodeURIComponent(runId)}/control`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              action: 'cancel',
+              reason,
+            }),
+          }
+        )
+        if (!response.ok) {
+          throw new Error(`Cancel subagent run failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Cancel Subagent Run'
+    )
+  }
+
+  static async listAiEmployees(organizationId?: string): Promise<AiEmployeeListResult | null> {
+    return withRetry(
+      async () => {
+        const params = new URLSearchParams()
+        if (organizationId) params.append('organization_id', organizationId)
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/goals/ai-employees?${params.toString()}`
+        )
+        if (!response.ok) {
+          throw new Error(`List AI employees failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.readRetryConfig,
+      'List AI Employees'
+    )
+  }
+
+  static async upsertAiEmployee(request: {
+    organizationId?: string
+    name: string
+    role?: string
+    specialty?: string
+    primarySkill?: string
+    skillStack?: string[]
+    status?: 'active' | 'paused' | string
+  }): Promise<GoalActionResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(`${this.baseURL}/goals/ai-employees/upsert`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            organization_id: request.organizationId,
+            name: request.name,
+            role: request.role || '',
+            specialty: request.specialty || '',
+            primary_skill: request.primarySkill || '',
+            skill_stack: request.skillStack || [],
+            status: request.status || 'active',
+          }),
+        })
+        if (!response.ok) {
+          throw new Error(`Upsert AI employee failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Upsert AI Employee'
+    )
+  }
+
+  static async deleteAiEmployee(name: string, organizationId?: string): Promise<GoalActionResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(`${this.baseURL}/goals/ai-employees/delete`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            organization_id: organizationId,
+            name,
+          }),
+        })
+        if (!response.ok) {
+          throw new Error(`Delete AI employee failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Delete AI Employee'
+    )
+  }
+
+  static async listAiSkillPresets(organizationId?: string): Promise<AiSkillPresetListResult | null> {
+    return withRetry(
+      async () => {
+        const params = new URLSearchParams()
+        if (organizationId) params.append('organization_id', organizationId)
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/goals/skill-presets?${params.toString()}`
+        )
+        if (!response.ok) {
+          throw new Error(`List AI skill presets failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.readRetryConfig,
+      'List AI Skill Presets'
+    )
+  }
+
+  static async upsertAiSkillPreset(request: {
+    organizationId?: string
+    id: string
+    name: string
+    primarySkill: string
+    skills: string[]
+  }): Promise<GoalActionResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(`${this.baseURL}/goals/skill-presets/upsert`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            organization_id: request.organizationId,
+            id: request.id,
+            name: request.name,
+            primary_skill: request.primarySkill,
+            skills: request.skills,
+          }),
+        })
+        if (!response.ok) {
+          throw new Error(`Upsert AI skill preset failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Upsert AI Skill Preset'
+    )
+  }
+
+  static async deleteAiSkillPreset(id: string, organizationId?: string): Promise<GoalActionResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(`${this.baseURL}/goals/skill-presets/delete`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            organization_id: organizationId,
+            id,
+          }),
+        })
+        if (!response.ok) {
+          throw new Error(`Delete AI skill preset failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Delete AI Skill Preset'
+    )
+  }
+
+  static async listNodes(options?: {
+    organizationId?: string
+    status?: 'online' | 'busy' | 'offline' | string
+    capability?: string
+    limit?: number
+  }): Promise<AgentNodeListResult | null> {
+    return withRetry(
+      async () => {
+        const params = new URLSearchParams()
+        if (options?.organizationId) params.append('organization_id', options.organizationId)
+        if (options?.status) params.append('status', options.status)
+        if (options?.capability) params.append('capability', options.capability)
+        if (options?.limit) params.append('limit', String(options.limit))
+        const query = params.toString()
+        const response = await this.fetchWithTimeout(
+          `${this.baseURL}/nodes${query ? `?${query}` : ''}`
+        )
+        if (!response.ok) {
+          throw new Error(`List nodes failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.readRetryConfig,
+      'List Nodes'
+    )
+  }
+
+  static async registerNode(request: {
+    nodeId: string
+    organizationId?: string
+    displayName?: string
+    host?: string
+    os?: string
+    arch?: string
+    status?: 'online' | 'busy' | 'offline' | string
+    capabilities?: string[]
+    metadata?: Record<string, any>
+  }): Promise<AgentNodeResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(`${this.baseURL}/nodes/register`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            node_id: request.nodeId,
+            organization_id: request.organizationId,
+            display_name: request.displayName || '',
+            host: request.host || '',
+            os: request.os || '',
+            arch: request.arch || '',
+            status: request.status || 'online',
+            capabilities: request.capabilities || [],
+            metadata: request.metadata || {},
+          }),
+        })
+        if (!response.ok) {
+          throw new Error(`Register node failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Register Node'
+    )
+  }
+
+  static async heartbeatNode(
+    nodeId: string,
+    request?: {
+      status?: 'online' | 'busy' | 'offline' | string
+      metadata?: Record<string, any>
+    }
+  ): Promise<AgentNodeResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(`${this.baseURL}/nodes/${encodeURIComponent(nodeId)}/heartbeat`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            status: request?.status || 'online',
+            metadata: request?.metadata || {},
+          }),
+        })
+        if (!response.ok) {
+          throw new Error(`Node heartbeat failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Node Heartbeat'
+    )
+  }
+
+  static async selectNode(request?: {
+    organizationId?: string
+    capability?: string
+    preferredOs?: string
+  }): Promise<AgentNodeResult | null> {
+    return withRetry(
+      async () => {
+        const response = await this.fetchWithTimeout(`${this.baseURL}/nodes/select`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            organization_id: request?.organizationId,
+            capability: request?.capability || '',
+            preferred_os: request?.preferredOs || '',
+          }),
+        })
+        if (!response.ok) {
+          throw new Error(`Select node failed: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      this.writeRetryConfig,
+      'Select Node'
     )
   }
 
@@ -1837,6 +2453,7 @@ export class AgentService {
     user_id?: string
     session_id?: string
     use_memory?: boolean
+    node_id?: string
   }): Promise<ChannelTaskResult | null> {
     return withRetry(
       async () => {
@@ -1849,6 +2466,7 @@ export class AgentService {
             user_id: request?.user_id || 'default-user',
             session_id: request?.session_id,
             use_memory: request?.use_memory ?? true,
+            node_id: request?.node_id || '',
           }),
         })
         if (!response.ok) {

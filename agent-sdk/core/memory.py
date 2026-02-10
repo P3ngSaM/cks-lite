@@ -9,6 +9,7 @@ import json
 import sqlite3
 import numpy as np
 import re
+from threading import Lock
 from difflib import SequenceMatcher
 from pathlib import Path
 from datetime import datetime
@@ -57,6 +58,9 @@ class MemoryManager:
         self.data_dir = data_dir
         self.db_path = data_dir / "memories.db"
         self.index_path = data_dir / "memory_index.faiss"
+        self.embedding_model_name = embedding_model
+        self.lazy_embedding_load = os.getenv("MEMORY_LAZY_EMBEDDING_LOAD", "1").strip().lower() in {"1", "true", "yes", "on"}
+        self._embedding_lock = Lock()
 
         # 初始化数据库
         self._init_database()
@@ -64,7 +68,7 @@ class MemoryManager:
         # 初始化嵌入模型
         self.embedding_model = None
         self.embedding_dim = 384  # default for all-MiniLM-L6-v2
-        if EMBEDDING_AVAILABLE:
+        if EMBEDDING_AVAILABLE and not self.lazy_embedding_load:
             try:
                 logger.info(f"加载嵌入模型: {embedding_model}")
                 self.embedding_model = SentenceTransformer(embedding_model)
@@ -72,6 +76,8 @@ class MemoryManager:
                 logger.info(f"嵌入维度: {self.embedding_dim}")
             except Exception as e:
                 logger.error(f"加载嵌入模型失败: {e}")
+        elif self.lazy_embedding_load and EMBEDDING_AVAILABLE:
+            logger.info("嵌入模型将按需懒加载，优先提升后端启动速度")
 
         # 初始化 FAISS 索引
         self.index = None
@@ -101,6 +107,22 @@ class MemoryManager:
                 logger.info(f"Markdown 记忆系统初始化: {workspace_dir}")
             except Exception as e:
                 logger.error(f"Markdown 记忆系统初始化失败: {e}")
+
+    def _ensure_embedding_ready(self):
+        if not EMBEDDING_AVAILABLE or self.embedding_model is not None:
+            return
+        with self._embedding_lock:
+            if self.embedding_model is not None:
+                return
+            try:
+                logger.info(f"懒加载嵌入模型: {self.embedding_model_name}")
+                self.embedding_model = SentenceTransformer(self.embedding_model_name)
+                self.embedding_dim = self.embedding_model.get_sentence_embedding_dimension()
+                if FAISS_AVAILABLE and self.index is None:
+                    self._init_faiss_index()
+                logger.info(f"嵌入模型准备完成，维度: {self.embedding_dim}")
+            except Exception as e:
+                logger.error(f"懒加载嵌入模型失败: {e}")
 
     def _init_database(self):
         """初始化数据库"""
@@ -455,6 +477,7 @@ class MemoryManager:
     ) -> str:
         """Save a memory with deduplication and importance scoring."""
         import uuid
+        self._ensure_embedding_ready()
 
         now_dt = datetime.now()
         metadata = metadata if isinstance(metadata, dict) else {}
@@ -612,6 +635,7 @@ class MemoryManager:
             similarity_threshold: 相似度阈值 (仅向量搜索)
             use_hybrid: 是否使用混合搜索 (False 则仅向量搜索)
         """
+        self._ensure_embedding_ready()
 
         # 如果启用了混合搜索服务，使用新的混合搜索
         if use_hybrid and self.hybrid_search and HYBRID_SEARCH_AVAILABLE:

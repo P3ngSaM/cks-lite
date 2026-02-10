@@ -4,6 +4,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useNavigate } from 'react-router-dom'
 import { SkillsList, InstallSkillDialog } from '@/components/skills'
+import { EmptyState, PageHeader } from '@/components/ui'
 import { AgentService } from '@/services/agentService'
 import { useSkillsStore } from '@/stores'
 import { cn } from '@/utils/cn'
@@ -523,34 +524,34 @@ export const Skills = () => {
   const handleRunExample = (skillName: string) => {
     const key = skillName.toLowerCase()
     const exactExampleMap: Record<string, string> = {
-      'demo-office-assistant': '???????????????1??????2??????????',
-      'find-skills': '??????????????????? 3 ??????????????????',
-      playwright: '?????????????????????????????????',
-      spreadsheet: '????????????????????????? 3 ????',
-      transcribe: '????????????? 5 ?????? 3 ??????',
-      screenshot: '????????????????????????',
-      'openai-docs': '??? OpenAI ????? Responses API ?????????????????',
-      'security-best-practices': '????????????????????????????',
-      github: '?????????????????????????????????',
+      'demo-office-assistant': '请帮我先整理桌面文件夹，再生成一封可直接发送的汇报邮件。',
+      'find-skills': '请帮我找到适合“自动化整理资料并输出周报”的 3 个技能，并给出推荐理由。',
+      playwright: '请用浏览器自动化帮我打开目标网页，抓取关键内容并输出摘要。',
+      spreadsheet: '请生成一份销售数据表格，并给出 3 条关键结论。',
+      transcribe: '请把这段音频转成文字，并提炼 3 条重点。',
+      screenshot: '请帮我截图当前页面并标注关键区域。',
+      'openai-docs': '请基于 OpenAI 官方文档，解释 Responses API 的最佳实践并给一个示例。',
+      'security-best-practices': '请检查当前流程的安全风险，并给出可落地的修复建议。',
+      github: '请分析这个仓库结构，并输出一份可执行的改造计划。',
     }
     let prompt = exactExampleMap[skillName]
     if (!prompt) {
       if (key.includes('playwright') || key.includes('browser')) {
-        prompt = '????????????????????????????????'
+        prompt = '请执行一次网页自动化任务，并输出执行结果与证据。'
       } else if (key.includes('excel') || key.includes('sheet') || key.includes('spreadsheet')) {
-        prompt = '???????????????????? + ???? + ???????'
+        prompt = '请生成结构化表格，并附上图表与简短结论。'
       } else if (key.includes('email') || key.includes('mail')) {
-        prompt = '??????????????????????????'
+        prompt = '请生成可直接发送的邮件版本与群公告版本。'
       } else if (key.includes('pdf') || key.includes('doc') || key.includes('document')) {
-        prompt = '????????????????????????'
+        prompt = '请读取文档并输出结构化摘要与待办清单。'
       } else if (key.includes('terminal') || key.includes('shell') || key.includes('command')) {
-        prompt = '?????????????????????????????????'
+        prompt = '请通过终端完成本次任务，并回传执行日志与结果。'
       } else if (key.includes('image') || key.includes('vision') || key.includes('screenshot')) {
-        prompt = '????????????????????????????'
+        prompt = '请基于视觉信息完成识别分析，并给出下一步动作。'
       } else if (key.includes('search') || key.includes('web') || key.includes('crawl')) {
-        prompt = '?????????????????????????????'
+        prompt = '请联网搜索相关资料，给出来源和结论摘要。'
       } else {
-        prompt = `????????${skillName}??????????????????????????????`
+        prompt = `请优先使用技能「${skillName}」完成任务，失败时自动切换到可用工具继续执行。`
       }
     }
     localStorage.setItem('cks.workbench.preferredSkill', skillName)
@@ -708,7 +709,7 @@ export const Skills = () => {
   }, [])
 
   return (
-    <div className="flex h-screen bg-black">
+    <div className="flex h-full bg-black">
       {/* Install Dialog */}
       <InstallSkillDialog
         isOpen={installDialogOpen}
@@ -739,7 +740,7 @@ export const Skills = () => {
                 <button
                   onClick={handleTranslateContext}
                   disabled={contextModal.isLoading || contextModal.isTranslating || !contextModal.content}
-                  className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border border-neutral-700 text-sm text-neutral-200 hover:bg-neutral-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  className="cks-btn cks-btn-secondary inline-flex items-center gap-2 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {contextModal.isTranslating ? (
                     <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-neutral-200" />
@@ -752,7 +753,7 @@ export const Skills = () => {
                 </button>
                 <button
                   onClick={closeContextModal}
-                  className="p-2 rounded-lg hover:bg-neutral-800 transition-colors"
+                  className="cks-btn cks-btn-secondary p-2"
                 >
                   <X className="h-5 w-5 text-neutral-400" />
                 </button>
@@ -781,36 +782,35 @@ export const Skills = () => {
 
       <div className="flex-1 flex flex-col">
         {/* Header */}
-        <div className="h-14 border-b border-neutral-800 flex items-center px-6">
-          <div className="flex-1">
-            <h1 className="text-base font-semibold text-white">
-              技能管理
-            </h1>
-            <p className="text-xs text-neutral-600 mt-0.5">
-              查看和管理 AI 助手的可用技能
-            </p>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setInstallDialogOpen(true)}
-              className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium bg-white text-black hover:bg-neutral-200 transition-colors"
-            >
-              <Download className="h-4 w-4" />
-              安装技能
-            </button>
-            <button
-              onClick={loadSkills}
-              className="p-2 rounded-lg text-neutral-500 hover:text-white hover:bg-neutral-900 transition-colors"
-            >
-              <RefreshCw className="h-5 w-5" />
-            </button>
-          </div>
+        <div className="border-b border-neutral-800 px-4 py-3 md:px-6">
+          <PageHeader
+            title="技能管理"
+            subtitle="查看和管理 AI 助手的可用技能"
+            icon={<Sparkles className="h-5 w-5 text-cyan-300" />}
+            className="bg-transparent"
+            actions={(
+              <>
+                <button
+                  onClick={() => setInstallDialogOpen(true)}
+                  className="cks-btn cks-btn-primary cks-focus-ring cks-transition-fast"
+                >
+                  <Download className="h-4 w-4" />
+                  安装技能
+                </button>
+                <button
+                  onClick={loadSkills}
+                  className="cks-btn cks-btn-secondary cks-focus-ring cks-transition-fast"
+                >
+                  <RefreshCw className="h-5 w-5" />
+                </button>
+              </>
+            )}
+          />
         </div>
 
         {/* Content */}
-        <div className="flex-1 overflow-y-auto p-6">
-          <div className="max-w-6xl mx-auto space-y-6">
+        <div className="flex-1 overflow-y-auto p-4 md:p-6">
+          <div className="max-w-7xl mx-auto space-y-6">
             <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-4">
               <div className="flex items-center gap-2 text-sm font-medium text-white">
                 <Sparkles className="h-4 w-4 text-cyan-300" />
@@ -822,12 +822,12 @@ export const Skills = () => {
                   value={autoInstallGoal}
                   onChange={(e) => setAutoInstallGoal(e.target.value)}
                   placeholder="例如：我要自动整理桌面文件并生成周报"
-                  className="flex-1 min-w-72 bg-black border border-neutral-700 rounded-lg px-3 py-2 text-sm text-white"
+                  className="cks-input flex-1 min-w-72 px-3 py-2 text-sm"
                 />
                 <select
                   value={autoInstallCount}
                   onChange={(e) => setAutoInstallCount(Number(e.target.value) || 1)}
-                  className="bg-black border border-neutral-700 rounded-lg px-2.5 py-2 text-sm text-neutral-200"
+                  className="cks-select rounded-lg px-2.5 py-2 text-sm text-neutral-200"
                 >
                   <option value={1}>安装 1 个</option>
                   <option value={2}>安装 2 个</option>
@@ -837,7 +837,7 @@ export const Skills = () => {
                   type="button"
                   onClick={handleAutoDiscoverAndInstall}
                   disabled={autoInstallRunning}
-                  className="px-3 py-2 rounded-lg bg-cyan-500/20 border border-cyan-500/40 text-cyan-200 text-sm hover:bg-cyan-500/30 disabled:opacity-50"
+                  className="cks-btn cks-btn-primary py-2 text-sm disabled:opacity-50"
                 >
                   {autoInstallRunning ? '正在搜索并安装...' : '一键自动安装'}
                 </button>
@@ -1056,7 +1056,7 @@ export const Skills = () => {
                 <button
                   onClick={loadAuditSnapshot}
                   disabled={auditLoading}
-                  className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md border border-neutral-700 text-xs text-neutral-300 hover:bg-neutral-800 disabled:opacity-60 disabled:cursor-not-allowed"
+                  className="cks-btn cks-btn-secondary inline-flex items-center gap-2 text-xs disabled:opacity-60 disabled:cursor-not-allowed"
                 >
                   <RefreshCw className={cn('h-3.5 w-3.5', auditLoading && 'animate-spin')} />
                   刷新
@@ -1067,13 +1067,13 @@ export const Skills = () => {
                   value={auditSessionId}
                   onChange={(e) => setAuditSessionId(e.target.value)}
                   placeholder="会话ID（可选）"
-                  className="bg-neutral-950 border border-neutral-800 rounded-md px-2 py-1.5 text-xs text-neutral-200 placeholder:text-neutral-600"
+                  className="cks-input px-2 py-1.5 text-xs placeholder:text-neutral-600"
                 />
                 <input
                   value={auditToolName}
                   onChange={(e) => setAuditToolName(e.target.value)}
                   placeholder="工具名（可选）"
-                  className="bg-neutral-950 border border-neutral-800 rounded-md px-2 py-1.5 text-xs text-neutral-200 placeholder:text-neutral-600"
+                  className="cks-input px-2 py-1.5 text-xs placeholder:text-neutral-600"
                 />
                 <input
                   type="number"
@@ -1081,7 +1081,7 @@ export const Skills = () => {
                   max={1000}
                   value={auditLimit}
                   onChange={(e) => setAuditLimit(Math.max(1, Math.min(1000, Number(e.target.value || 1))))}
-                  className="bg-neutral-950 border border-neutral-800 rounded-md px-2 py-1.5 text-xs text-neutral-200"
+                  className="cks-input px-2 py-1.5 text-xs"
                 />
               </div>
               <div className="grid grid-cols-1 md:grid-cols-4 gap-2 mt-2">
@@ -1089,19 +1089,19 @@ export const Skills = () => {
                   type="datetime-local"
                   value={auditFromTime}
                   onChange={(e) => setAuditFromTime(e.target.value)}
-                  className="bg-neutral-950 border border-neutral-800 rounded-md px-2 py-1.5 text-xs text-neutral-200"
+                  className="cks-input px-2 py-1.5 text-xs"
                 />
                 <input
                   type="datetime-local"
                   value={auditToTime}
                   onChange={(e) => setAuditToTime(e.target.value)}
-                  className="bg-neutral-950 border border-neutral-800 rounded-md px-2 py-1.5 text-xs text-neutral-200"
+                  className="cks-input px-2 py-1.5 text-xs"
                 />
                 <div className="flex items-center gap-2">
                   <button
                     onClick={loadAuditSnapshot}
                     disabled={auditLoading}
-                    className="px-2.5 py-1.5 rounded-md text-xs bg-white text-black hover:bg-neutral-300 disabled:opacity-60 disabled:cursor-not-allowed"
+                    className="cks-btn cks-btn-primary px-2.5 py-1.5 text-xs disabled:opacity-60 disabled:cursor-not-allowed"
                   >
                     应用
                   </button>
@@ -1127,21 +1127,21 @@ export const Skills = () => {
                       }
                     }}
                     disabled={auditLoading}
-                    className="px-2.5 py-1.5 rounded-md text-xs border border-neutral-700 text-neutral-300 hover:bg-neutral-800 disabled:opacity-60 disabled:cursor-not-allowed"
+                    className="cks-btn cks-btn-secondary px-2.5 py-1.5 text-xs disabled:opacity-60 disabled:cursor-not-allowed"
                   >
                     重置
                   </button>
                   <button
                     onClick={handleExportAuditJson}
                     disabled={auditLoading}
-                    className="px-2.5 py-1.5 rounded-md text-xs border border-neutral-700 text-neutral-300 hover:bg-neutral-800 disabled:opacity-60 disabled:cursor-not-allowed"
+                    className="cks-btn cks-btn-secondary px-2.5 py-1.5 text-xs disabled:opacity-60 disabled:cursor-not-allowed"
                   >
                     导出JSON
                   </button>
                   <button
                     onClick={handleExportAuditCsv}
                     disabled={auditLoading}
-                    className="px-2.5 py-1.5 rounded-md text-xs border border-neutral-700 text-neutral-300 hover:bg-neutral-800 disabled:opacity-60 disabled:cursor-not-allowed"
+                    className="cks-btn cks-btn-secondary px-2.5 py-1.5 text-xs disabled:opacity-60 disabled:cursor-not-allowed"
                   >
                     导出CSV
                   </button>
@@ -1152,7 +1152,7 @@ export const Skills = () => {
                   <p className="text-xs text-neutral-400 mb-2">执行记录 ({auditExecutions.length})</p>
                   <div className="space-y-2 max-h-44 overflow-y-auto pr-1">
                     {auditExecutions.length === 0 && (
-                      <p className="text-xs text-neutral-600">暂无执行记录。</p>
+                      <EmptyState title="暂无执行记录" className="py-3" />
                     )}
                     {auditExecutions.map((row, index) => {
                       const toolName = row.tool_name || row.tool || 'unknown_tool'
@@ -1175,7 +1175,7 @@ export const Skills = () => {
                   <p className="text-xs text-neutral-400 mb-2">错误记录 ({auditErrors.length})</p>
                   <div className="space-y-2 max-h-44 overflow-y-auto pr-1">
                     {auditErrors.length === 0 && (
-                      <p className="text-xs text-neutral-600">暂无错误记录。</p>
+                      <EmptyState title="暂无错误记录" className="py-3" />
                     )}
                     {auditErrors.map((row, index) => {
                       const toolName = row.tool_name || row.tool || 'unknown_tool'

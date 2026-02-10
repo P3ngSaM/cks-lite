@@ -1,21 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { CheckCircle2, Download, FileText, Link2, Plus, RefreshCw, Target, Trash2, X } from 'lucide-react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
+import { EmptyState, MoreActions, PageHeader, SectionLoading, StatTile, StatusBadge } from '@/components/ui'
 import { AgentService } from '@/services/agentService'
 import { useChatStore } from '@/stores'
+import { getReviewStatusMeta, getTaskStatusMeta } from '@/utils/statusMeta'
 import type { AuditRecord, GoalKPI, GoalTaskListItem } from '@/types/agent'
 
 const progressColor = (value: number) => {
   if (value >= 80) return 'bg-green-500'
   if (value >= 40) return 'bg-yellow-500'
   return 'bg-blue-500'
-}
-
-const reviewStatusLabel = (status?: string) => {
-  const normalized = (status || 'pending').toLowerCase()
-  if (normalized === 'accepted') return '已验收'
-  if (normalized === 'rejected') return '已驳回'
-  return '待验收'
 }
 
 const toDatetimeLocal = (iso?: string) => {
@@ -75,6 +70,9 @@ export const Goals = () => {
   const [reviewReason, setReviewReason] = useState('')
   const [batchReviewReason, setBatchReviewReason] = useState('')
   const [isReviewing, setIsReviewing] = useState(false)
+  const [queueGenerating, setQueueGenerating] = useState(false)
+  const [queueLaunching, setQueueLaunching] = useState(false)
+  const [todayQueueResult, setTodayQueueResult] = useState<Array<{ taskId: number; title: string; assignee: string; risk: number }>>([])
   const fromWorkbench = searchParams.get('from') === 'workbench'
   const [organizationId, setOrganizationId] = useState(() => localStorage.getItem('cks.goals.organizationId') || 'default-org')
   const [organizationCatalog, setOrganizationCatalog] = useState<string[]>(() => {
@@ -587,54 +585,210 @@ export const Goals = () => {
     setOrganizationId('default-org')
   }
 
+  const chainRows = useMemo(() => {
+    const rows: Array<{
+      key: string
+      kpiId: number
+      okrId: number
+      projectId: number
+      kpiTitle: string
+      okrTitle: string
+      projectTitle: string
+      projectProgress: number
+      taskTotal: number
+      inProgress: number
+      pendingReview: number
+      accepted: number
+      rejected: number
+      riskScore: number
+      nextTask: { id: number; title: string; assignee: string } | null
+    }> = []
+
+    for (const kpi of kpis) {
+      for (const okr of kpi.okrs || []) {
+        for (const project of okr.projects || []) {
+          const tasks = project.tasks || []
+          const taskTotal = tasks.length
+          const inProgress = tasks.filter((task) => (task.status || '').toLowerCase() === 'todo').length
+          const pendingReview = tasks.filter((task) => {
+            const status = (task.status || '').toLowerCase()
+            const reviewStatus = (task.review_status || 'pending').toLowerCase()
+            return status === 'done' && reviewStatus === 'pending'
+          }).length
+          const accepted = tasks.filter((task) => (task.review_status || '').toLowerCase() === 'accepted').length
+          const rejected = tasks.filter((task) => (task.review_status || '').toLowerCase() === 'rejected').length
+          const nextTask = tasks.find((task) => {
+            const reviewStatus = (task.review_status || 'pending').toLowerCase()
+            const status = (task.status || '').toLowerCase()
+            return (status === 'done' && reviewStatus === 'pending') || status === 'todo'
+          }) || null
+          const riskScore = pendingReview * 3 + rejected * 4 + inProgress
+
+          rows.push({
+            key: `${kpi.id}-${okr.id}-${project.id}`,
+            kpiId: kpi.id,
+            okrId: okr.id,
+            projectId: project.id,
+            kpiTitle: kpi.title,
+            okrTitle: okr.title,
+            projectTitle: project.title,
+            projectProgress: project.progress,
+            taskTotal,
+            inProgress,
+            pendingReview,
+            accepted,
+            rejected,
+            riskScore,
+            nextTask: nextTask ? { id: nextTask.id, title: nextTask.title, assignee: nextTask.assignee || '' } : null,
+          })
+        }
+      }
+    }
+
+    rows.sort((a, b) => {
+      if (b.riskScore !== a.riskScore) return b.riskScore - a.riskScore
+      return b.taskTotal - a.taskTotal
+    })
+    return rows
+  }, [kpis])
+
+  const chainSummary = useMemo(() => {
+    return chainRows.reduce(
+      (acc, row) => {
+        acc.projects += 1
+        acc.tasks += row.taskTotal
+        acc.pendingReview += row.pendingReview
+        acc.inProgress += row.inProgress
+        acc.accepted += row.accepted
+        acc.rejected += row.rejected
+        return acc
+      },
+      { projects: 0, tasks: 0, pendingReview: 0, inProgress: 0, accepted: 0, rejected: 0 }
+    )
+  }, [chainRows])
+
+  const generateTodayExecutionQueue = useCallback(async () => {
+    const candidates = chainRows.filter((row) => row.nextTask && row.nextTask.assignee.trim()).slice(0, 5)
+    if (candidates.length === 0) {
+      window.alert('暂无可派发的高风险任务，请先补充任务负责人。')
+      return
+    }
+    setQueueGenerating(true)
+    try {
+      const queued: Array<{ taskId: number; title: string; assignee: string; risk: number }> = []
+      for (const row of candidates) {
+        if (!row.nextTask) continue
+        const assignee = row.nextTask.assignee.trim()
+        if (!assignee) continue
+        const result = await AgentService.setDashboardNextTask(assignee, row.nextTask.id, organizationId)
+        if (result?.success) {
+          queued.push({
+            taskId: row.nextTask.id,
+            title: row.nextTask.title,
+            assignee,
+            risk: row.riskScore,
+          })
+        }
+      }
+      setTodayQueueResult(queued)
+      if (queued[0]) {
+        startTaskInWorkbench({ id: queued[0].taskId, title: queued[0].title })
+      }
+    } catch (error) {
+      console.error('Failed to generate today execution queue:', error)
+      window.alert('生成今日执行队列失败，请稍后重试。')
+    } finally {
+      setQueueGenerating(false)
+    }
+  }, [chainRows, organizationId])
+
+  const launchTodayQueueInWorkbench = useCallback(() => {
+    if (todayQueueResult.length === 0) {
+      window.alert('今日执行队列为空，请先生成队列。')
+      return
+    }
+    setQueueLaunching(true)
+    try {
+      const grouped = new Map<string, Array<{ taskId: number; title: string }>>()
+      for (const item of todayQueueResult) {
+        const assignee = item.assignee.trim() || '未分配'
+        const bucket = grouped.get(assignee) || []
+        bucket.push({ taskId: item.taskId, title: item.title })
+        grouped.set(assignee, bucket)
+      }
+
+      const createdSessions: string[] = []
+      for (const [assignee, tasks] of grouped.entries()) {
+        for (const task of tasks) {
+          const sessionId = createSession(`今日队列 · ${assignee} · #${task.taskId}`)
+          setSessionGoalTask(sessionId, task.taskId)
+          setSessionOrganization(sessionId, organizationId)
+          createdSessions.push(sessionId)
+        }
+      }
+
+      if (createdSessions[0]) {
+        setCurrentSession(createdSessions[0])
+        navigate('/workbench')
+      }
+      window.alert(`已批量拉起 ${todayQueueResult.length} 个任务会话，按员工分组排队。`)
+    } finally {
+      setQueueLaunching(false)
+    }
+  }, [createSession, navigate, organizationId, setCurrentSession, setSessionGoalTask, setSessionOrganization, todayQueueResult])
+
   return (
     <div className="h-full bg-black text-white overflow-hidden flex flex-col">
-      <div className="h-16 border-b border-neutral-800 px-6 flex items-center justify-between">
-        <div>
-          <h1 className="text-lg font-semibold">目标管理</h1>
-          <p className="text-xs text-neutral-500 mt-0.5">KPI / OKR / 项目 / 任务分层进度</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-neutral-400">组织</span>
-          <select value={organizationId} onChange={(e) => setOrganizationId(e.target.value || 'default-org')} className="bg-neutral-950 border border-neutral-700 rounded px-2.5 py-2 text-xs min-w-36">
-            {organizationCatalog.map((org) => (
-              <option key={org} value={org}>{org}</option>
-            ))}
-          </select>
-          <button
-            onClick={() => {
-              loadTree()
-              loadTaskRows()
-            }}
-            disabled={isLoading || taskRowsLoading}
-            className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-sm disabled:opacity-50"
-          >
-            <RefreshCw className={`h-4 w-4 ${(isLoading || taskRowsLoading) ? 'animate-spin' : ''}`} />
-            刷新
-          </button>
-          <details className="relative">
-            <summary className="list-none cursor-pointer inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-sm">
-              组织设置
-            </summary>
-            <div className="absolute right-0 top-full mt-2 w-64 rounded-lg border border-neutral-700 bg-neutral-950 p-3 shadow-xl z-30">
-              <p className="text-xs text-neutral-500 mb-2">管理组织目录（仅本地）</p>
-              <input value={newOrganizationId} onChange={(e) => setNewOrganizationId(e.target.value)} placeholder="新组织 ID" className="w-full bg-black border border-neutral-700 rounded px-2.5 py-2 text-xs mb-2" />
-              <button onClick={addOrganizationToCatalog} className="w-full rounded border border-neutral-700 hover:border-neutral-500 px-2 py-1.5 text-xs mb-1.5">
-                新增组织
+      <div className="border-b border-neutral-800 px-4 py-3 md:px-6">
+        <PageHeader
+          title="目标管理"
+          subtitle="KPI / OKR / 项目 / 任务分层进度"
+          icon={<Target className="h-5 w-5 text-cyan-300" />}
+          className="bg-transparent"
+          actions={(
+            <>
+              <span className="text-xs text-neutral-400">组织</span>
+              <select value={organizationId} onChange={(e) => setOrganizationId(e.target.value || 'default-org')} className="cks-select px-2.5 py-2 text-xs min-w-36">
+                {organizationCatalog.map((org) => (
+                  <option key={org} value={org}>{org}</option>
+                ))}
+              </select>
+              <button
+                onClick={() => {
+                  loadTree()
+                  loadTaskRows()
+                }}
+                disabled={isLoading || taskRowsLoading}
+                className="cks-btn cks-btn-secondary cks-focus-ring disabled:opacity-50"
+              >
+                <RefreshCw className={`h-4 w-4 ${(isLoading || taskRowsLoading) ? 'animate-spin' : ''}`} />
+                刷新
               </button>
-              <button onClick={renameCurrentOrganization} className="w-full rounded border border-neutral-700 hover:border-neutral-500 px-2 py-1.5 text-xs mb-1.5">
-                重命名当前组织
-              </button>
-              <button onClick={removeCurrentOrganizationFromCatalog} className="w-full rounded border border-red-500/40 text-red-300 hover:bg-red-500/10 px-2 py-1.5 text-xs">
-                移除当前组织
-              </button>
-            </div>
-          </details>
-        </div>
+              <details className="relative">
+                <summary className="cks-btn cks-btn-secondary cks-focus-ring list-none cursor-pointer">
+                  组织设置
+                </summary>
+                <div className="absolute right-0 top-full mt-2 w-64 rounded-lg border border-neutral-700 bg-neutral-950 p-3 shadow-xl z-30">
+                  <p className="text-xs text-neutral-500 mb-2">管理组织目录（仅本地）</p>
+                  <input value={newOrganizationId} onChange={(e) => setNewOrganizationId(e.target.value)} placeholder="新组织 ID" className="w-full cks-select px-2.5 py-2 text-xs mb-2" />
+                  <button onClick={addOrganizationToCatalog} className="w-full cks-btn cks-btn-secondary mb-1.5">
+                    新增组织
+                  </button>
+                  <button onClick={renameCurrentOrganization} className="w-full cks-btn cks-btn-secondary mb-1.5">
+                    重命名当前组织
+                  </button>
+                  <button onClick={removeCurrentOrganizationFromCatalog} className="w-full cks-btn cks-btn-danger border-red-500/40 text-red-300 hover:bg-red-500/10">
+                    移除当前组织
+                  </button>
+                </div>
+              </details>
+            </>
+          )}
+        />
       </div>
 
-      <div className="flex-1 min-h-0 grid grid-cols-12 gap-4 p-4">
-        <div className="col-span-4 bg-neutral-950 border border-neutral-800 rounded-xl p-4 overflow-y-auto">
+      <div className="flex-1 min-h-0 grid grid-cols-1 xl:grid-cols-12 gap-4 p-4 md:p-5">
+        <div className="xl:col-span-4 bg-neutral-950 border border-neutral-800 rounded-xl p-4 overflow-y-auto">
           <div className="flex items-center gap-2 mb-3">
             <Target className="h-4 w-4 text-blue-400" />
             <h2 className="text-sm font-semibold">新增目标</h2>
@@ -660,8 +814,8 @@ export const Goals = () => {
             {createStep === 'kpi' ? (
               <>
                 <p className="text-xs text-neutral-400">第 1 步：创建 KPI</p>
-                <input value={kpiTitle} onChange={(e) => setKpiTitle(e.target.value)} placeholder="输入 KPI 标题" className="w-full bg-black border border-neutral-700 rounded-lg px-3 py-2 text-sm" />
-                <button onClick={handleCreateKpi} disabled={isSaving || !kpiTitle.trim()} className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-white text-black py-2 text-sm font-medium disabled:opacity-40">
+                <input value={kpiTitle} onChange={(e) => setKpiTitle(e.target.value)} placeholder="输入 KPI 标题" className="cks-input w-full px-3 py-2 text-sm" />
+                <button onClick={handleCreateKpi} disabled={isSaving || !kpiTitle.trim()} className="w-full cks-btn cks-btn-primary inline-flex items-center justify-center gap-2 py-2 text-sm font-medium disabled:opacity-40">
                   <Plus className="h-4 w-4" />
                   创建 KPI
                 </button>
@@ -671,38 +825,38 @@ export const Goals = () => {
             {createStep === 'okr' ? (
               <>
                 <p className="text-xs text-neutral-400">第 2 步：在 KPI 下创建 OKR</p>
-                <select value={selectedKpiId ?? ''} onChange={(e) => { const id = Number(e.target.value); setSelectedKpiId(Number.isNaN(id) ? null : id); setSelectedOkrId(null); setSelectedProjectId(null) }} className="w-full bg-black border border-neutral-700 rounded-lg px-3 py-2 text-sm">
+                <select value={selectedKpiId ?? ''} onChange={(e) => { const id = Number(e.target.value); setSelectedKpiId(Number.isNaN(id) ? null : id); setSelectedOkrId(null); setSelectedProjectId(null) }} className="cks-input w-full px-3 py-2 text-sm">
                   <option value="">选择 KPI</option>
                   {kpis.map((kpi) => <option key={kpi.id} value={kpi.id}>{kpi.title}</option>)}
                 </select>
-                <input value={okrTitle} onChange={(e) => setOkrTitle(e.target.value)} placeholder="输入 OKR 标题" className="w-full bg-black border border-neutral-700 rounded-lg px-3 py-2 text-sm" />
-                <button onClick={handleCreateOkr} disabled={isSaving || !selectedKpiId || !okrTitle.trim()} className="w-full rounded-lg bg-neutral-100 text-black py-2 text-sm font-medium disabled:opacity-40">创建 OKR</button>
+                <input value={okrTitle} onChange={(e) => setOkrTitle(e.target.value)} placeholder="输入 OKR 标题" className="cks-input w-full px-3 py-2 text-sm" />
+                <button onClick={handleCreateOkr} disabled={isSaving || !selectedKpiId || !okrTitle.trim()} className="w-full cks-btn cks-btn-secondary py-2 text-sm font-medium disabled:opacity-40">创建 OKR</button>
               </>
             ) : null}
 
             {createStep === 'project' ? (
               <>
                 <p className="text-xs text-neutral-400">第 3 步：在 OKR 下创建项目</p>
-                <select value={selectedOkrId ?? ''} onChange={(e) => { const id = Number(e.target.value); setSelectedOkrId(Number.isNaN(id) ? null : id); setSelectedProjectId(null) }} className="w-full bg-black border border-neutral-700 rounded-lg px-3 py-2 text-sm">
+                <select value={selectedOkrId ?? ''} onChange={(e) => { const id = Number(e.target.value); setSelectedOkrId(Number.isNaN(id) ? null : id); setSelectedProjectId(null) }} className="cks-input w-full px-3 py-2 text-sm">
                   <option value="">选择 OKR</option>
                   {(selectedKpi?.okrs || []).map((okr) => <option key={okr.id} value={okr.id}>{okr.title}</option>)}
                 </select>
-                <input value={projectTitle} onChange={(e) => setProjectTitle(e.target.value)} placeholder="输入项目标题" className="w-full bg-black border border-neutral-700 rounded-lg px-3 py-2 text-sm" />
-                <button onClick={handleCreateProject} disabled={isSaving || !selectedOkrId || !projectTitle.trim()} className="w-full rounded-lg bg-neutral-100 text-black py-2 text-sm font-medium disabled:opacity-40">创建项目</button>
+                <input value={projectTitle} onChange={(e) => setProjectTitle(e.target.value)} placeholder="输入项目标题" className="cks-input w-full px-3 py-2 text-sm" />
+                <button onClick={handleCreateProject} disabled={isSaving || !selectedOkrId || !projectTitle.trim()} className="w-full cks-btn cks-btn-secondary py-2 text-sm font-medium disabled:opacity-40">创建项目</button>
               </>
             ) : null}
 
             {createStep === 'task' ? (
               <>
                 <p className="text-xs text-neutral-400">第 4 步：在项目下创建任务</p>
-                <select value={selectedProjectId ?? ''} onChange={(e) => { const id = Number(e.target.value); setSelectedProjectId(Number.isNaN(id) ? null : id) }} className="w-full bg-black border border-neutral-700 rounded-lg px-3 py-2 text-sm">
+                <select value={selectedProjectId ?? ''} onChange={(e) => { const id = Number(e.target.value); setSelectedProjectId(Number.isNaN(id) ? null : id) }} className="cks-input w-full px-3 py-2 text-sm">
                   <option value="">选择项目</option>
                   {(selectedOkr?.projects || []).map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}
                 </select>
-                <input value={taskTitle} onChange={(e) => setTaskTitle(e.target.value)} placeholder="输入任务标题" className="w-full bg-black border border-neutral-700 rounded-lg px-3 py-2 text-sm" />
-                <input value={taskAssignee} onChange={(e) => setTaskAssignee(e.target.value)} placeholder="负责人（可选）" className="w-full bg-black border border-neutral-700 rounded-lg px-3 py-2 text-sm" />
-                <input value={taskDepartment} onChange={(e) => setTaskDepartment(e.target.value)} placeholder="部门（可选）" className="w-full bg-black border border-neutral-700 rounded-lg px-3 py-2 text-sm" />
-                <button onClick={handleCreateTask} disabled={isSaving || !selectedProjectId || !taskTitle.trim()} className="w-full rounded-lg bg-neutral-100 text-black py-2 text-sm font-medium disabled:opacity-40">创建任务</button>
+                <input value={taskTitle} onChange={(e) => setTaskTitle(e.target.value)} placeholder="输入任务标题" className="cks-input w-full px-3 py-2 text-sm" />
+                <input value={taskAssignee} onChange={(e) => setTaskAssignee(e.target.value)} placeholder="负责人（可选）" className="cks-input w-full px-3 py-2 text-sm" />
+                <input value={taskDepartment} onChange={(e) => setTaskDepartment(e.target.value)} placeholder="部门（可选）" className="cks-input w-full px-3 py-2 text-sm" />
+                <button onClick={handleCreateTask} disabled={isSaving || !selectedProjectId || !taskTitle.trim()} className="w-full cks-btn cks-btn-secondary py-2 text-sm font-medium disabled:opacity-40">创建任务</button>
               </>
             ) : null}
           </div>
@@ -710,15 +864,117 @@ export const Goals = () => {
           <div className="border-t border-neutral-800 pt-4">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold">会话联动</h3>
-              {activeTaskId ? <button onClick={clearBoundTask} className="text-xs text-neutral-300 hover:text-white">清除绑定</button> : null}
+              {activeTaskId ? <button onClick={clearBoundTask} className="cks-btn cks-btn-secondary px-2 py-1 text-xs">清除绑定</button> : null}
             </div>
             <p className="text-xs text-neutral-500 mt-1">当前绑定任务：{activeTaskId ? `#${activeTaskId}` : '未绑定'}</p>
           </div>
         </div>
 
-        <div className="col-span-8 bg-neutral-950 border border-neutral-800 rounded-xl p-4 overflow-y-auto">
+        <div className="xl:col-span-8 bg-neutral-950 border border-neutral-800 rounded-xl p-4 overflow-y-auto">
           <h2 className="text-sm font-semibold mb-3">结构总览</h2>
-          {kpis.length === 0 && <div className="h-24 rounded-lg border border-dashed border-neutral-700 flex items-center justify-center text-sm text-neutral-500">暂无目标，请先创建 KPI</div>}
+          <div className="mb-4 rounded-lg border border-cyan-500/30 bg-cyan-500/5 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="text-xs text-cyan-200">目标链路驾驶舱（任务 → 项目 → OKR → KPI）</div>
+              <div className="flex items-center gap-2">
+                <div className="text-[11px] text-neutral-400">项目 {chainSummary.projects} · 任务 {chainSummary.tasks}</div>
+                <button
+                  onClick={generateTodayExecutionQueue}
+                  disabled={queueGenerating}
+                  className="cks-btn cks-btn-primary text-[11px] disabled:opacity-50"
+                >
+                  {queueGenerating ? '生成中...' : '生成今日执行队列'}
+                </button>
+                <button
+                  onClick={launchTodayQueueInWorkbench}
+                  disabled={queueLaunching || todayQueueResult.length === 0}
+                  className="cks-btn cks-btn-secondary text-[11px] border-violet-500/40 text-violet-200 hover:bg-violet-500/10 disabled:opacity-50"
+                >
+                  {queueLaunching ? '拉起中...' : '一键批量拉起'}
+                </button>
+              </div>
+            </div>
+            <div className="mt-2 grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-2">
+              <StatTile title="进行中" value={<span className="text-blue-300">{chainSummary.inProgress}</span>} />
+              <StatTile title="待验收" value={<span className="text-amber-300">{chainSummary.pendingReview}</span>} />
+              <StatTile title="已验收" value={<span className="text-emerald-300">{chainSummary.accepted}</span>} />
+              <StatTile title="驳回返工" value={<span className="text-rose-300">{chainSummary.rejected}</span>} />
+              <StatTile
+                title="验收通过率"
+                value={<span className="text-cyan-300">{chainSummary.tasks > 0 ? Math.round((chainSummary.accepted / chainSummary.tasks) * 100) : 0}%</span>}
+              />
+            </div>
+            <div className="mt-2 max-h-40 overflow-y-auto border border-neutral-800 rounded">
+              {chainRows.length === 0 ? (
+                <EmptyState title="暂无可展示的项目链路" className="m-2 py-3 text-[11px]" />
+              ) : (
+                <table className="w-full text-[11px]">
+                  <thead className="bg-neutral-900 text-neutral-500">
+                    <tr>
+                      <th className="text-left p-2">链路</th>
+                      <th className="text-left p-2">任务</th>
+                      <th className="text-left p-2">风险</th>
+                      <th className="text-left p-2">动作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {chainRows.slice(0, 12).map((row) => (
+                      <tr key={row.key} className="border-t border-neutral-800">
+                        <td className="p-2">
+                          <div className="text-neutral-300 truncate">{row.kpiTitle} / {row.okrTitle} / {row.projectTitle}</div>
+                          <div className="text-neutral-500">进度 {row.projectProgress.toFixed(1)}%</div>
+                        </td>
+                        <td className="p-2 text-neutral-400">总计 {row.taskTotal} · 已验收 {row.accepted}</td>
+                        <td className="p-2 text-neutral-400">
+                          待验收 {row.pendingReview} · 驳回 {row.rejected} · 进行中 {row.inProgress}
+                        </td>
+                        <td className="p-2">
+                          <div className="flex items-center gap-1">
+                            <button
+                              onClick={() => {
+                                setSelectedKpiId(row.kpiId)
+                                setSelectedOkrId(row.okrId)
+                                setSelectedProjectId(row.projectId)
+                              }}
+                              className="cks-btn cks-btn-secondary"
+                            >
+                              定位层级
+                            </button>
+                            {row.nextTask ? (
+                              <button
+                                onClick={() => startTaskInWorkbench(row.nextTask!)}
+                                className="cks-btn cks-btn-primary"
+                              >
+                                拉起下一任务
+                              </button>
+                            ) : null}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+            {todayQueueResult.length > 0 ? (
+              <div className="mt-2 rounded border border-emerald-500/30 bg-emerald-500/5 p-2">
+                <div className="text-[11px] text-emerald-300">今日执行队列（已下发）</div>
+                <div className="mt-1 text-[11px] text-neutral-300 space-y-1">
+                  {todayQueueResult.map((item) => (
+                    <div key={`queue-${item.taskId}-${item.assignee}`} className="flex items-center justify-between gap-2">
+                      <span>#{item.taskId} {item.assignee} · 风险分 {item.risk}</span>
+                      <button
+                        onClick={() => startTaskInWorkbench({ id: item.taskId, title: item.title })}
+                        className="px-2 py-0.5 rounded border border-cyan-500/40 text-cyan-300 hover:bg-cyan-500/10"
+                      >
+                        进入执行
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </div>
+          {kpis.length === 0 && <EmptyState title="暂无目标，请先创建 KPI" className="h-24 flex items-center justify-center" />}
 
           <div className="space-y-3">
             {kpis.map((kpi) => (
@@ -743,7 +999,7 @@ export const Goals = () => {
                           handleDeleteKpi(kpi.id)
                         }}
                         disabled={isSaving}
-                        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-red-500/40 text-red-300 hover:bg-red-500/10 disabled:opacity-40"
+                        className="cks-btn cks-btn-danger px-1.5 py-0.5 disabled:opacity-40"
                         title="删除 KPI"
                       >
                         <Trash2 className="h-3 w-3" />
@@ -756,7 +1012,7 @@ export const Goals = () => {
                 </summary>
 
                 <div className="mt-3 pl-3 border-l border-neutral-800 space-y-2">
-                  {kpi.okrs.length === 0 ? <p className="text-xs text-neutral-500">暂无 OKR</p> : null}
+                  {kpi.okrs.length === 0 ? <EmptyState title="暂无 OKR" className="py-3" /> : null}
                   {kpi.okrs.map((okr) => (
                     <details key={okr.id} open={selectedOkrId === okr.id} className="border border-neutral-800 rounded-lg p-2 bg-black/40">
                       <summary
@@ -779,7 +1035,7 @@ export const Goals = () => {
                                 handleDeleteOkr(okr.id)
                               }}
                               disabled={isSaving}
-                              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-red-500/40 text-red-300 hover:bg-red-500/10 disabled:opacity-40"
+                              className="cks-btn cks-btn-danger px-1.5 py-0.5 disabled:opacity-40"
                               title="删除 OKR"
                             >
                               <Trash2 className="h-3 w-3" />
@@ -789,7 +1045,7 @@ export const Goals = () => {
                       </summary>
 
                       <div className="mt-2 pl-3 border-l border-neutral-800 space-y-1">
-                        {okr.projects.length === 0 ? <p className="text-xs text-neutral-500">暂无项目</p> : null}
+                        {okr.projects.length === 0 ? <EmptyState title="暂无项目" className="py-3" /> : null}
                         {okr.projects.map((project) => (
                           <details key={project.id} open={selectedProjectId === project.id} className="rounded-md border border-neutral-800 px-2 py-1 bg-neutral-950">
                             <summary
@@ -811,7 +1067,7 @@ export const Goals = () => {
                                       handleDeleteProject(project.id)
                                     }}
                                     disabled={isSaving}
-                                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-red-500/40 text-red-300 hover:bg-red-500/10 disabled:opacity-40"
+                                    className="cks-btn cks-btn-danger px-1.5 py-0.5 disabled:opacity-40"
                                     title="删除项目"
                                   >
                                     <Trash2 className="h-3 w-3" />
@@ -821,7 +1077,7 @@ export const Goals = () => {
                             </summary>
 
                             <div className="mt-1 pl-3 border-l border-neutral-800 space-y-1">
-                              {project.tasks.length === 0 ? <p className="text-xs text-neutral-500">暂无任务</p> : null}
+                              {project.tasks.length === 0 ? <EmptyState title="暂无任务" className="py-3" /> : null}
                               {project.tasks.map((task) => (
                                 <div key={task.id} className="text-xs text-neutral-300 bg-black/50 rounded px-2 py-1.5">
                                   <div className="flex items-start justify-between gap-2">
@@ -830,9 +1086,10 @@ export const Goals = () => {
                                       {task.assignee ? `（${task.assignee}）` : ''}
                                       {task.department ? ` · ${task.department}` : ''}
                                     </span>
-                                    <span className={`px-1.5 py-0.5 rounded text-[10px] border ${task.status === 'done' ? 'border-green-500/40 text-green-300' : 'border-neutral-600 text-neutral-400'}`}>
-                                      {task.status === 'done' ? '已完成' : '进行中'}
-                                    </span>
+                                    <StatusBadge
+                                      label={getTaskStatusMeta(task.status || '').label}
+                                      className={`${getTaskStatusMeta(task.status || '').badgeClassName} text-[10px]`}
+                                    />
                                   </div>
                                   <div className="mt-1.5 flex items-center gap-1">
                                     <button onClick={() => {
@@ -840,7 +1097,7 @@ export const Goals = () => {
                                       setSelectedOkrId(okr.id)
                                       setSelectedProjectId(project.id)
                                       bindTaskToWorkbench(task.id)
-                                    }} className={`px-2 py-1 rounded border inline-flex items-center gap-1 ${activeTaskId === task.id ? 'bg-blue-600/20 text-blue-300 border-blue-500/40' : 'bg-neutral-900 text-neutral-300 border-neutral-700 hover:border-blue-500/40'}`}>
+                                    }} className={`cks-btn inline-flex items-center gap-1 ${activeTaskId === task.id ? 'cks-btn-primary' : 'cks-btn-secondary border-neutral-700 text-neutral-300 hover:border-blue-500/40'}`}>
                                       <Link2 className="h-3.5 w-3.5" />
                                       绑定
                                     </button>
@@ -849,7 +1106,7 @@ export const Goals = () => {
                                       setSelectedOkrId(okr.id)
                                       setSelectedProjectId(project.id)
                                       startTaskInWorkbench(task)
-                                    }} className="px-2 py-1 rounded border border-cyan-500/40 text-cyan-300 hover:bg-cyan-500/10">
+                                    }} className="cks-btn cks-btn-primary">
                                       开始执行
                                     </button>
                                     {task.status === 'done' ? (
@@ -860,12 +1117,12 @@ export const Goals = () => {
                                         setSelectedOkrId(okr.id)
                                         setSelectedProjectId(project.id)
                                         handleCompleteTask(task.id)
-                                      }} disabled={isSaving} className="px-2 py-1 rounded bg-green-600/20 text-green-300 border border-green-500/30 hover:bg-green-600/30">完成</button>
+                                      }} disabled={isSaving} className="cks-btn cks-btn-secondary border-green-500/30 text-green-300 bg-green-600/20 hover:bg-green-600/30">完成</button>
                                     )}
                                     <button
                                       onClick={() => handleDeleteTask(task.id)}
                                       disabled={isSaving}
-                                      className="px-2 py-1 rounded border border-red-500/40 text-red-300 hover:bg-red-500/10 disabled:opacity-40"
+                                      className="cks-btn cks-btn-danger disabled:opacity-40"
                                     >
                                       删除
                                     </button>
@@ -886,34 +1143,34 @@ export const Goals = () => {
           <div className="mt-6 border-t border-neutral-800 pt-4">
             <div className="flex items-center justify-between mb-3">
               <h2 className="text-sm font-semibold">任务筛选（from/to）</h2>
-              <button onClick={exportTasksCsv} className="inline-flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded border border-neutral-700 hover:border-neutral-500">
+              <button onClick={exportTasksCsv} className="cks-btn cks-btn-secondary inline-flex items-center gap-1.5">
                 <Download className="h-3.5 w-3.5" />
                 导出 CSV
               </button>
             </div>
 
             <div className="grid grid-cols-7 gap-2 mb-3">
-              <input value={filterAssignee} onChange={(e) => setFilterAssignee(e.target.value)} placeholder="负责人" className="bg-black border border-neutral-700 rounded px-2.5 py-2 text-xs" />
-              <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} className="bg-black border border-neutral-700 rounded px-2.5 py-2 text-xs">
+              <input value={filterAssignee} onChange={(e) => setFilterAssignee(e.target.value)} placeholder="负责人" className="cks-select px-2.5 py-2 text-xs" />
+              <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} className="cks-select px-2.5 py-2 text-xs">
                 <option value="">全部状态</option>
                 <option value="todo">待办</option>
                 <option value="done">已完成</option>
               </select>
-              <select value={filterReviewStatus} onChange={(e) => setFilterReviewStatus(e.target.value)} className="bg-black border border-neutral-700 rounded px-2.5 py-2 text-xs">
+              <select value={filterReviewStatus} onChange={(e) => setFilterReviewStatus(e.target.value)} className="cks-select px-2.5 py-2 text-xs">
                 <option value="">全部验收</option>
                 <option value="pending">待验收</option>
                 <option value="accepted">已验收</option>
                 <option value="rejected">已驳回</option>
               </select>
-              <input type="datetime-local" value={filterFromTime} onChange={(e) => setFilterFromTime(e.target.value)} className="bg-black border border-neutral-700 rounded px-2.5 py-2 text-xs" />
-              <input type="datetime-local" value={filterToTime} onChange={(e) => setFilterToTime(e.target.value)} className="bg-black border border-neutral-700 rounded px-2.5 py-2 text-xs" />
-              <button onClick={loadTaskRows} className="bg-neutral-900 border border-neutral-700 rounded px-2.5 py-2 text-xs hover:bg-neutral-800">应用筛选</button>
+              <input type="datetime-local" value={filterFromTime} onChange={(e) => setFilterFromTime(e.target.value)} className="cks-select px-2.5 py-2 text-xs" />
+              <input type="datetime-local" value={filterToTime} onChange={(e) => setFilterToTime(e.target.value)} className="cks-select px-2.5 py-2 text-xs" />
+              <button onClick={loadTaskRows} className="cks-btn cks-btn-secondary px-2.5 py-2">应用筛选</button>
             </div>
 
             <div className="mb-3 flex items-center gap-2">
               <button
                 onClick={quickFilterPendingReview}
-                className="px-2.5 py-1.5 text-xs rounded border border-amber-500/40 text-amber-300 hover:bg-amber-500/10"
+                className="cks-btn cks-btn-secondary border-amber-500/40 text-amber-300 hover:bg-amber-500/10"
               >
                 {filterReviewStatus === 'pending' ? '查看全部任务' : '仅看待验收'}
               </button>
@@ -921,19 +1178,19 @@ export const Goals = () => {
                 value={batchReviewReason}
                 onChange={(e) => setBatchReviewReason(e.target.value)}
                 placeholder="批量验收备注（可选）"
-                className="flex-1 bg-black border border-neutral-700 rounded px-2.5 py-1.5 text-xs"
+                className="cks-input flex-1 px-2.5 py-1.5 text-xs"
               />
               <button
                 onClick={() => handleBatchReview('accept')}
                 disabled={isReviewing || selectedTaskIds.length === 0}
-                className="px-2.5 py-1.5 text-xs rounded border border-green-500/40 text-green-300 hover:bg-green-500/10 disabled:opacity-50"
+                className="cks-btn cks-btn-secondary border-green-500/40 text-green-300 hover:bg-green-500/10 disabled:opacity-50"
               >
                 批量验收通过（{selectedTaskIds.length}）
               </button>
               <button
                 onClick={() => handleBatchReview('reject')}
                 disabled={isReviewing || selectedTaskIds.length === 0}
-                className="px-2.5 py-1.5 text-xs rounded border border-red-500/40 text-red-300 hover:bg-red-500/10 disabled:opacity-50"
+                className="cks-btn cks-btn-danger disabled:opacity-50"
               >
                 批量驳回返工
               </button>
@@ -941,9 +1198,9 @@ export const Goals = () => {
 
             <div className="max-h-56 overflow-y-auto border border-neutral-800 rounded">
               {taskRowsLoading ? (
-                <div className="p-3 text-xs text-neutral-500">加载中...</div>
+                <SectionLoading label="加载任务中..." className="p-3" />
               ) : taskRows.length === 0 ? (
-                <div className="p-3 text-xs text-neutral-500">当前筛选无任务</div>
+                <EmptyState title="当前筛选无任务" className="m-3 py-3" />
               ) : (
                 <table className="w-full text-xs">
                   <thead className="bg-neutral-900/60 text-neutral-400">
@@ -979,27 +1236,41 @@ export const Goals = () => {
                         <td className="p-2">{row.assignee || '-'}</td>
                         <td className="p-2">{row.department || '-'}</td>
                         <td className="p-2">
-                          <div>{row.status}</div>
-                          <div className="text-[11px] text-neutral-500">{reviewStatusLabel(row.review_status)}</div>
+                          <div>
+                            <StatusBadge
+                              label={getTaskStatusMeta(row.status || '').label}
+                              className={getTaskStatusMeta(row.status || '').badgeClassName}
+                            />
+                          </div>
+                          <StatusBadge
+                            label={getReviewStatusMeta(row.review_status).label}
+                            className={`mt-1 ${getReviewStatusMeta(row.review_status).badgeClassName}`}
+                          />
                         </td>
                         <td className="p-2">{toDatetimeLocal(row.updated_at).replace('T', ' ')}</td>
                         <td className="p-2">
                           <div className="flex items-center gap-1">
-                            <button onClick={() => replayTaskAudit(row)} className="inline-flex items-center gap-1 px-2 py-1 rounded border border-neutral-700 hover:border-blue-500/40 text-neutral-300 hover:text-blue-300">
-                              <FileText className="h-3.5 w-3.5" />
-                              详情/回放
-                            </button>
-                            <button onClick={() => startTaskInWorkbench(row)} className="inline-flex items-center gap-1 px-2 py-1 rounded border border-cyan-500/40 text-cyan-300 hover:bg-cyan-500/10">
+                            <button onClick={() => startTaskInWorkbench(row)} className="inline-flex items-center gap-1 cks-btn cks-btn-primary">
                               开始
                             </button>
-                            <button
-                              onClick={() => handleDeleteTask(row.id)}
-                              disabled={isSaving}
-                              className="inline-flex items-center gap-1 px-2 py-1 rounded border border-red-500/40 text-red-300 hover:bg-red-500/10 disabled:opacity-40"
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                              删除
-                            </button>
+                            <MoreActions
+                              items={[
+                                {
+                                  key: 'replay',
+                                  label: '详情/回放',
+                                  onClick: () => replayTaskAudit(row),
+                                  icon: <FileText className="h-3.5 w-3.5" />,
+                                },
+                                {
+                                  key: 'delete',
+                                  label: '删除',
+                                  onClick: () => handleDeleteTask(row.id),
+                                  icon: <Trash2 className="h-3.5 w-3.5" />,
+                                  danger: true,
+                                  disabled: isSaving,
+                                },
+                              ]}
+                            />
                           </div>
                         </td>
                       </tr>
@@ -1027,9 +1298,21 @@ export const Goals = () => {
 
             <div className="text-xs text-neutral-300 bg-neutral-900 border border-neutral-800 rounded p-3 space-y-1">
               <p>负责人：{detailTask.assignee || '-'}</p>
-              <p>状态：{detailTask.status}</p>
+              <p>
+                状态：
+                <StatusBadge
+                  label={getTaskStatusMeta(detailTask.status || '').label}
+                  className={`ml-1 ${getTaskStatusMeta(detailTask.status || '').badgeClassName}`}
+                />
+              </p>
               <p>进度：{detailTask.progress}%</p>
-              <p>验收：{reviewStatusLabel(detailTask.review_status)}</p>
+              <p>
+                验收：
+                <StatusBadge
+                  label={getReviewStatusMeta(detailTask.review_status).label}
+                  className={`ml-1 ${getReviewStatusMeta(detailTask.review_status).badgeClassName}`}
+                />
+              </p>
               <p>验收人：{detailTask.reviewed_by || '-'}</p>
               <p>验收时间：{detailTask.reviewed_at || '-'}</p>
               <p>层级：{detailTask.kpi_title} / {detailTask.okr_title} / {detailTask.project_title}</p>
@@ -1042,20 +1325,20 @@ export const Goals = () => {
                 onChange={(e) => setReviewReason(e.target.value)}
                 rows={3}
                 placeholder="填写验收备注或驳回原因（可选）"
-                className="mt-2 w-full rounded border border-neutral-700 bg-neutral-900 px-2 py-1.5 text-xs text-neutral-200 outline-none focus:border-blue-500"
+                className="cks-textarea mt-2 w-full px-2 py-1.5 text-xs"
               />
               <div className="mt-2 flex items-center gap-2">
                 <button
                   onClick={() => handleReviewTask(detailTask.id, 'accept')}
                   disabled={isReviewing}
-                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs rounded border border-green-500/40 text-green-300 hover:bg-green-500/10 disabled:opacity-50"
+                  className="inline-flex items-center gap-1 cks-btn cks-btn-secondary border-green-500/40 text-green-300 hover:bg-green-500/10 disabled:opacity-50"
                 >
                   验收通过
                 </button>
                 <button
                   onClick={() => handleReviewTask(detailTask.id, 'reject')}
                   disabled={isReviewing}
-                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs rounded border border-red-500/40 text-red-300 hover:bg-red-500/10 disabled:opacity-50"
+                  className="inline-flex items-center gap-1 cks-btn cks-btn-danger disabled:opacity-50"
                 >
                   驳回返工
                 </button>
@@ -1068,7 +1351,7 @@ export const Goals = () => {
                 <RefreshCw className={`h-3.5 w-3.5 ${auditLoading ? 'animate-spin' : ''}`} />
                 一键回放任务审计日志
               </button>
-              <button onClick={exportTaskAuditJson} className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs rounded border border-neutral-700 text-neutral-300 hover:border-neutral-500">
+              <button onClick={exportTaskAuditJson} className="cks-btn cks-btn-secondary inline-flex items-center gap-1">
                 <Download className="h-3.5 w-3.5" />
                 导出任务日志 JSON
               </button>
@@ -1100,9 +1383,9 @@ export const Goals = () => {
               <h4 className="text-sm font-semibold mb-2">执行日志</h4>
               <div className="space-y-2 max-h-56 overflow-y-auto">
                 {auditLoading ? (
-                  <p className="text-xs text-neutral-500">加载中...</p>
+                  <SectionLoading label="加载执行日志..." />
                 ) : auditExecutions.length === 0 ? (
-                  <p className="text-xs text-neutral-500">暂无执行日志</p>
+                  <EmptyState title="暂无执行日志" className="py-3" />
                 ) : auditExecutions.map((r, idx) => (
                   <div key={`e-${idx}`} className="border border-neutral-800 rounded p-2 text-xs">
                     <p className="text-neutral-400">{r.timestamp || r.ts}</p>
@@ -1125,9 +1408,9 @@ export const Goals = () => {
               <h4 className="text-sm font-semibold mb-2">错误日志</h4>
               <div className="space-y-2 max-h-56 overflow-y-auto">
                 {auditLoading ? (
-                  <p className="text-xs text-neutral-500">加载中...</p>
+                  <SectionLoading label="加载错误日志..." />
                 ) : auditErrors.length === 0 ? (
-                  <p className="text-xs text-neutral-500">暂无错误日志</p>
+                  <EmptyState title="暂无错误日志" className="py-3" />
                 ) : auditErrors.map((r, idx) => (
                   <div key={`x-${idx}`} className="border border-red-900/40 bg-red-950/20 rounded p-2 text-xs">
                     <p className="text-neutral-400">{r.timestamp || r.ts}</p>

@@ -3,13 +3,15 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { ChatHistorySidebar } from '@/components/layout/ChatHistorySidebar'
 import { MessageList, ChatInput } from '@/components/chat'
 import { PermissionApprovalDialog } from '@/components/chat/PermissionApprovalDialog'
+import { EmptyState, MoreActions, SectionLoading, StatusBadge } from '@/components/ui'
 import { open as openShellTarget } from '@tauri-apps/plugin-shell'
 import { AgentService } from '@/services/agentService'
 import { classifyRisk, describeToolRequest, executeDesktopTool } from '@/services/desktopToolBridge'
 import { useChatStore, useUserStore, usePermissionStore, waitForPermissionDecision, resolvePermissionDecision } from '@/stores'
 import { localizeSkill } from '@/utils/skillI18n'
+import { getApprovalStatusMeta, getReviewStatusMeta, getTaskStatusMeta, getToolRunStatusMeta } from '@/utils/statusMeta'
 import type { Message, SearchResult, ToolCallInfo } from '@/types/chat'
-import type { ExecutionApprovalRecord, Skill } from '@/types/agent'
+import type { AutonomyEvent, ExecutionApprovalRecord, GoalTaskExecutionReadiness, GoalTaskListItem, Skill } from '@/types/agent'
 // Generate unique ID
 const generateId = () => `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
 // Desktop tool names that require permission bridging
@@ -55,24 +57,45 @@ const toolNameLabelMap: Record<string, string> = {
   list_directory: '\u5217\u51fa\u76ee\u5f55',
   get_file_info: '\u6587\u4ef6\u4fe1\u606f',
   delete_file: '\u5220\u9664\u6587\u4ef6',
-  get_platform_info: '系统平台信息',
-  open_application: '打开应用',
-  type_text: '输入文本',
-  press_hotkey: '发送快捷键',
-  send_feishu_message: '飞书发送消息',
-  send_desktop_message: '桌面IM发送消息',
-  capture_screen: '屏幕截图',
-  mouse_move: '移动鼠标',
-  mouse_click: '鼠标点击',
-  mouse_scroll: '滚动页面',
-  analyze_screen: '视觉分析',
-  visual_next_action: '视觉下一步规划',
+  get_platform_info: '\u7cfb\u7edf\u5e73\u53f0\u4fe1\u606f',
+  open_application: '\u6253\u5f00\u5e94\u7528',
+  type_text: '\u8f93\u5165\u6587\u672c',
+  press_hotkey: '\u53d1\u9001\u5feb\u6377\u952e',
+  send_feishu_message: '\u98de\u4e66\u53d1\u9001\u6d88\u606f',
+  send_desktop_message: '\u684c\u9762IM\u53d1\u9001\u6d88\u606f',
+  capture_screen: '\u5c4f\u5e55\u622a\u56fe',
+  mouse_move: '\u79fb\u52a8\u9f20\u6807',
+  mouse_click: '\u9f20\u6807\u70b9\u51fb',
+  mouse_scroll: '\u6eda\u52a8\u9875\u9762',
+  analyze_screen: '\u89c6\u89c9\u5206\u6790',
+  visual_next_action: '\u89c6\u89c9\u4e0b\u4e00\u6b65\u89c4\u5212',
   demo_prepare_ppt_and_email: '\u751f\u6210PPT\u4e0e\u90ae\u4ef6',
   demo_organize_files: '\u6574\u7406\u6587\u4ef6',
   demo_summarize_folder: '\u6587\u6863\u603b\u7ed3',
 }
 
 const formatToolLabel = (tool: string): string => toolNameLabelMap[tool] || tool
+const autonomyStageLabelMap: Record<string, string> = {
+  planning: '\u89c4\u5212',
+  clarify: '\u6f84\u6e05',
+  execute: '\u6267\u884c',
+  verify: '\u6821\u9a8c',
+  fallback: '\u9000\u8def',
+  deliver: '\u4ea4\u4ed8',
+}
+const formatAutonomyStageLabel = (stage?: string): string => autonomyStageLabelMap[String(stage || '').toLowerCase()] || (stage || '\u6267\u884c')
+const parseAutonomyMetadata = (value: AutonomyEvent['metadata']): Record<string, unknown> => {
+  if (!value) return {}
+  if (typeof value === 'object') return value as Record<string, unknown>
+  if (typeof value !== 'string') return {}
+  try {
+    const parsed = JSON.parse(value)
+    return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {}
+  } catch {
+    return {}
+  }
+}
+
 const formatTimelineValue = (value: unknown): string => {
   if (value == null) return ''
   if (typeof value === 'string') return value
@@ -127,12 +150,6 @@ const shouldRequireApproval = (
   if (policy === 'never') return false
   if (policy === 'high-only') return risk === 'high'
   return risk === 'medium' || risk === 'high'
-}
-const approvalStatusLabel: Record<string, string> = {
-  pending: '待处理',
-  approved: '已批准',
-  denied: '已拒绝',
-  expired: '已过期',
 }
 const getCurrentOrganizationId = (sessionOrganizationId?: string | null): string => {
   const sessionOrg = (sessionOrganizationId || '').trim()
@@ -219,6 +236,10 @@ export const Workbench = () => {
   const approvalToLocalRequestMapRef = useRef<Map<string, string>>(new Map())
   const activeGoalTaskId = currentSessionId ? (sessionGoalTaskMap[currentSessionId] ?? null) : null
   const activeSessionOrganizationId = currentSessionId ? (sessionOrganizationMap[currentSessionId] ?? null) : null
+  const currentOrganizationId = useMemo(
+    () => getCurrentOrganizationId(activeSessionOrganizationId),
+    [activeSessionOrganizationId]
+  )
   const [activeTimelineIndex, setActiveTimelineIndex] = useState<number>(-1)
   const [timelineExpanded, setTimelineExpanded] = useState(false)
   const [streamStartedAt, setStreamStartedAt] = useState<number | null>(null)
@@ -226,8 +247,16 @@ export const Workbench = () => {
   const [lastRunDurationSec, setLastRunDurationSec] = useState(0)
   const [openDeliverableError, setOpenDeliverableError] = useState<string | null>(null)
   const [topPanelsCollapsed, setTopPanelsCollapsed] = useState(true)
+  const [showHeaderAdvanced, setShowHeaderAdvanced] = useState(false)
+  const [executionNodeId, setExecutionNodeId] = useState('')
   const [auditWritebackState, setAuditWritebackState] = useState<'idle' | 'saving' | 'done' | 'error'>('idle')
   const [auditWritebackMessage, setAuditWritebackMessage] = useState('')
+  const [activeTaskContext, setActiveTaskContext] = useState<GoalTaskListItem | null>(null)
+  const [activeTaskContextLoading, setActiveTaskContextLoading] = useState(false)
+  const [activeTaskContextError, setActiveTaskContextError] = useState<string | null>(null)
+  const [taskReadiness, setTaskReadiness] = useState<GoalTaskExecutionReadiness | null>(null)
+  const [taskReadinessLoading, setTaskReadinessLoading] = useState(false)
+  const [taskReadinessError, setTaskReadinessError] = useState<string | null>(null)
   const [lastRunMetrics, setLastRunMetrics] = useState<{
     responseMode: 'fast' | 'balanced' | 'deep'
     firstTokenMs: number | null
@@ -250,16 +279,47 @@ export const Workbench = () => {
   const [timelineSkillFilter, setTimelineSkillFilter] = useState('')
   const [linkedChannelTaskId, setLinkedChannelTaskId] = useState<number | null>(null)
   const [timelineLinkedOnly, setTimelineLinkedOnly] = useState(false)
+  const [autonomyEvents, setAutonomyEvents] = useState<AutonomyEvent[]>([])
+  const [autonomyLoading, setAutonomyLoading] = useState(false)
+  const [autonomyReplayExpanded, setAutonomyReplayExpanded] = useState(false)
   const routeTaskHandledRef = useRef<string>('')
+  const taskProfileLoadedRef = useRef<number | null>(null)
   const [streamPhase, setStreamPhase] = useState<{ label: string; progress: number }>({
     label: '\u51c6\u5907\u4e2d',
     progress: 5,
   })
+  const loadAutonomyEvents = useCallback(async () => {
+    if (!currentSessionId) {
+      setAutonomyEvents([])
+      return
+    }
+    setAutonomyLoading(true)
+    try {
+      const result = await AgentService.listAutonomyEvents({
+        session_id: currentSessionId,
+        goal_task_id: activeGoalTaskId || undefined,
+        limit: 120,
+      })
+      if (result?.success && Array.isArray(result.events)) {
+        setAutonomyEvents(result.events)
+      } else {
+        setAutonomyEvents([])
+      }
+    } catch (error) {
+      console.warn('Failed to load autonomy events:', error)
+      setAutonomyEvents([])
+    } finally {
+      setAutonomyLoading(false)
+    }
+  }, [activeGoalTaskId, currentSessionId])
   // 响应式获取当前会话的消息
   const messages = useMemo(() => {
     if (!currentSessionId || !sessions[currentSessionId]) return []
     return sessions[currentSessionId].messages
   }, [currentSessionId, sessions])
+  useEffect(() => {
+    void loadAutonomyEvents()
+  }, [loadAutonomyEvents])
   // Create initial session and ask for user name if needed
   useEffect(() => {
     if (!currentSessionId) {
@@ -310,6 +370,7 @@ export const Workbench = () => {
     const storedApprovalScope = localStorage.getItem('cks.workbench.approvalScope')
     const storedTopPanelsCollapsed = localStorage.getItem('cks.workbench.topPanelsCollapsed')
     const seedPrompt = localStorage.getItem('cks.workbench.seedPrompt')
+    const storedExecutionNodeId = localStorage.getItem('cks.workbench.executionNodeId')
     if (commander) {
       setCommanderMode(commander === '1')
     }
@@ -338,7 +399,15 @@ export const Workbench = () => {
       setApprovalScope(storedApprovalScope)
     }
     if (storedTopPanelsCollapsed === '1' || storedTopPanelsCollapsed === '0') {
-      setTopPanelsCollapsed(storedTopPanelsCollapsed === '1')
+      // On laptop-size screens keep top panels collapsed by default.
+      if (window.innerHeight < 900) {
+        setTopPanelsCollapsed(true)
+      } else {
+        setTopPanelsCollapsed(storedTopPanelsCollapsed === '1')
+      }
+    }
+    if (storedExecutionNodeId && storedExecutionNodeId.trim()) {
+      setExecutionNodeId(storedExecutionNodeId.trim())
     }
     if (storedToolPolicyMap) {
       try {
@@ -361,6 +430,17 @@ export const Workbench = () => {
       addMessage(tipMessage)
       localStorage.removeItem('cks.workbench.seedPrompt')
     }
+    if (storedExecutionNodeId && currentSessionId) {
+      const nodeTip: Message = {
+        id: generateId(),
+        role: 'assistant',
+        content: `已绑定执行节点：${storedExecutionNodeId}。后续会优先按该节点能力执行。`,
+        timestamp: Date.now(),
+        status: 'sent',
+      }
+      addMessage(nodeTip)
+      localStorage.removeItem('cks.workbench.executionNodeId')
+    }
   }, [currentSessionId, addMessage])
   useEffect(() => {
     localStorage.setItem('cks.workbench.commanderMode', commanderMode ? '1' : '0')
@@ -380,6 +460,11 @@ export const Workbench = () => {
   }, [toolPolicyMap])
   useEffect(() => {
     localStorage.setItem('cks.workbench.topPanelsCollapsed', topPanelsCollapsed ? '1' : '0')
+  }, [topPanelsCollapsed])
+  useEffect(() => {
+    if (topPanelsCollapsed) {
+      setShowHeaderAdvanced(false)
+    }
   }, [topPanelsCollapsed])
   useEffect(() => {
     if (!isStreaming || !streamStartedAt) {
@@ -431,6 +516,117 @@ export const Workbench = () => {
       localStorage.removeItem('cks.workbench.openApprovalCenter')
     }
   }, [refreshPendingApprovals])
+  useEffect(() => {
+    if (!activeGoalTaskId) {
+      setActiveTaskContext(null)
+      setActiveTaskContextError(null)
+      setActiveTaskContextLoading(false)
+      return
+    }
+    let cancelled = false
+    const loadTaskContext = async () => {
+      setActiveTaskContextLoading(true)
+      setActiveTaskContextError(null)
+      try {
+        const result = await AgentService.listGoalTasks({
+          organizationId: currentOrganizationId,
+          taskId: activeGoalTaskId,
+          limit: 1,
+        })
+        if (cancelled) return
+        if (result?.success && result.tasks && result.tasks[0]) {
+          setActiveTaskContext(result.tasks[0])
+        } else {
+          setActiveTaskContext(null)
+          setActiveTaskContextError(result?.error || `未找到任务 #${activeGoalTaskId}`)
+        }
+      } catch (error) {
+        if (cancelled) return
+        setActiveTaskContext(null)
+        setActiveTaskContextError(error instanceof Error ? error.message : String(error))
+      } finally {
+        if (!cancelled) setActiveTaskContextLoading(false)
+      }
+    }
+    void loadTaskContext()
+    return () => {
+      cancelled = true
+    }
+  }, [activeGoalTaskId, currentOrganizationId])
+  useEffect(() => {
+    if (!activeGoalTaskId) {
+      setTaskReadiness(null)
+      setTaskReadinessError(null)
+      setTaskReadinessLoading(false)
+      return
+    }
+    let cancelled = false
+    const loadReadiness = async () => {
+      setTaskReadinessLoading(true)
+      setTaskReadinessError(null)
+      try {
+        const result = await AgentService.getGoalTaskExecutionReadiness(activeGoalTaskId, currentOrganizationId)
+        if (cancelled) return
+        if (result?.success && result.data) {
+          setTaskReadiness(result.data)
+        } else {
+          setTaskReadiness(null)
+          setTaskReadinessError(result?.error || '未获取到任务执行就绪状态')
+        }
+      } catch (error) {
+        if (cancelled) return
+        setTaskReadiness(null)
+        setTaskReadinessError(error instanceof Error ? error.message : String(error))
+      } finally {
+        if (!cancelled) setTaskReadinessLoading(false)
+      }
+    }
+    if (!isStreaming) {
+      void loadReadiness()
+    }
+    return () => {
+      cancelled = true
+    }
+  }, [activeGoalTaskId, currentOrganizationId, isStreaming])
+  useEffect(() => {
+    if (!activeGoalTaskId) {
+      taskProfileLoadedRef.current = null
+      return
+    }
+    if (taskProfileLoadedRef.current === activeGoalTaskId) return
+    let cancelled = false
+    const loadTaskAgentProfile = async () => {
+      try {
+        const result = await AgentService.getGoalTaskAgentProfile(activeGoalTaskId, currentOrganizationId)
+        if (cancelled || !result?.success || !result.data) return
+        const profile = result.data
+        const preferred = String(profile.preferred_skill || '').trim()
+        if (preferred) {
+          setPreferredSkill(preferred)
+          setCommanderMode(false)
+        }
+        setSkillStrict(Boolean(profile.skill_strict))
+        const seedPrompt = String(profile.seed_prompt || '').trim()
+        if (seedPrompt && currentSessionId) {
+          const tipMessage: Message = {
+            id: generateId(),
+            role: 'assistant',
+            content: `已加载任务 #${activeGoalTaskId} 的员工执行配置。\n${seedPrompt}`,
+            timestamp: Date.now(),
+            status: 'sent',
+          }
+          addMessage(tipMessage)
+        }
+        taskProfileLoadedRef.current = activeGoalTaskId
+      } catch (error) {
+        console.warn('Failed to load task agent profile:', error)
+      }
+    }
+    void loadTaskAgentProfile()
+    return () => {
+      cancelled = true
+    }
+  }, [activeGoalTaskId, addMessage, currentOrganizationId, currentSessionId])
   const handleApprovalDecision = useCallback(async (
     requestId: string,
     approved: boolean,
@@ -493,6 +689,9 @@ export const Workbench = () => {
         }
       }
     }
+    const dispatchContent = executionNodeId
+      ? `[执行节点: ${executionNodeId}]\n请优先使用该节点能力执行当前任务；若节点不可用请先说明原因并给出替代方案。\n\n${content}`
+      : content
     // Add user message
     const userMessage: Message = {
       id: generateId(),
@@ -523,9 +722,29 @@ export const Workbench = () => {
       let currentToolCalls: ToolCallInfo[] = []
       let firstTokenMs: number | null = null
       let firstToolMs: number | null = null
+      let progressMoments: string[] = []
+      const buildStreamingContent = () => {
+        const progressSection = progressMoments.length > 0
+          ? `执行进度：\n${progressMoments.map((line) => `- ${line}`).join('\n')}\n\n`
+          : ''
+        const body = accumulatedContent.trim()
+        return `${progressSection}${body}`.trim() || '收到，正在处理...'
+      }
+      const markProgress = (label: string) => {
+        const timestamp = new Date().toLocaleTimeString('zh-CN', {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: false,
+        })
+        const line = `${timestamp} ${label}`
+        const last = progressMoments[progressMoments.length - 1]
+        if (last === line) return
+        progressMoments = [...progressMoments.slice(-5), line]
+      }
       for await (const chunk of AgentService.chatStream({
         user_id: 'default-user',
-        message: content,
+        message: dispatchContent,
         session_id: currentSessionId || 'default',
         use_memory: responseMode !== 'fast',
         fast_mode: responseMode === 'fast',
@@ -539,7 +758,20 @@ export const Workbench = () => {
         if (chunk.error && chunk.type !== 'search_error' && chunk.type !== 'tool_result') {
           throw new Error(chunk.error)
         }
-        if (chunk.type === 'text' && chunk.content) {
+        if (chunk.type === 'autonomy_status') {
+          const stageLabel = formatAutonomyStageLabel(String(chunk.stage || 'execute'))
+          const statusText = String(chunk.message || '\u5df2\u8fdb\u5165\u81ea\u6cbb\u6267\u884c\u6d41\u7a0b')
+          setStreamPhase((prev) => ({
+            label: `\u81ea\u6cbb${stageLabel}\uff1a${statusText}`,
+            progress: clampProgress(Math.max(prev.progress, 40)),
+          }))
+          markProgress(`\u81ea\u6cbb${stageLabel}\uff1a${statusText}`)
+          updateMessage(assistantMessageId, {
+            content: buildStreamingContent(),
+            status: 'sending',
+            toolCalls: currentToolCalls.length > 0 ? [...currentToolCalls] : undefined,
+          })
+        } else if (chunk.type === 'text' && chunk.content) {
           if (firstTokenMs == null) {
             firstTokenMs = Math.max(0, Date.now() - runStartedAt)
             setLastRunMetrics((prev) => ({ ...prev, firstTokenMs }))
@@ -552,7 +784,7 @@ export const Workbench = () => {
           accumulatedContent += chunk.content
           // Update message content in real-time
           updateMessage(assistantMessageId, {
-            content: accumulatedContent,
+            content: buildStreamingContent(),
             status: 'sending',
             isSearching: false,
             searchResults: currentSearchResults.length > 0 ? currentSearchResults : undefined,
@@ -567,6 +799,7 @@ export const Workbench = () => {
             label: `\u6b63\u5728\u6267\u884c\uff1a${formatToolLabel(chunk.tool)}`,
             progress: clampProgress(Math.max(prev.progress, 55)),
           }))
+          markProgress(`开始执行：${formatToolLabel(chunk.tool)}`)
           // Tool/skill execution started
           const isDesktop = DESKTOP_TOOL_NAMES.has(chunk.tool)
           currentToolCalls.push({
@@ -578,7 +811,7 @@ export const Workbench = () => {
             kind: resolveToolKind(chunk.tool),
           })
           updateMessage(assistantMessageId, {
-            content: accumulatedContent,
+            content: buildStreamingContent(),
             status: 'sending',
             toolCalls: [...currentToolCalls]
           })
@@ -587,6 +820,7 @@ export const Workbench = () => {
             label: `\u684c\u9762\u5de5\u5177\u5f85\u5904\u7406\uff1a${formatToolLabel(chunk.tool as string)}`,
             progress: clampProgress(Math.max(prev.progress, 60)),
           }))
+          markProgress(`等待桌面执行：${formatToolLabel(chunk.tool as string)}`)
           // Desktop tool request — needs user permission
           const requestId = chunk.request_id as string
           const tool = chunk.tool as string
@@ -620,7 +854,7 @@ export const Workbench = () => {
             })
           }
           updateMessage(assistantMessageId, {
-            content: accumulatedContent,
+            content: buildStreamingContent(),
             status: 'sending',
             toolCalls: [...currentToolCalls]
           })
@@ -712,7 +946,7 @@ export const Workbench = () => {
             }
           }
           updateMessage(assistantMessageId, {
-            content: accumulatedContent,
+            content: buildStreamingContent(),
             status: 'sending',
             toolCalls: [...currentToolCalls]
           })
@@ -723,6 +957,7 @@ export const Workbench = () => {
             label: chunk.success ? '\u5de5\u5177\u6267\u884c\u5b8c\u6210\uff0c\u7ee7\u7eed\u63a8\u7406' : '\u5de5\u5177\u6267\u884c\u5931\u8d25\uff0c\u5c1d\u8bd5\u7ee7\u7eed',
             progress: clampProgress(Math.max(prev.progress, 72)),
           }))
+          markProgress(chunk.success ? `执行完成：${formatToolLabel(chunk.tool)}` : `执行失败：${formatToolLabel(chunk.tool)}`)
           // Tool/skill execution completed
           const idx = (() => {
             for (let i = currentToolCalls.length - 1; i >= 0; i -= 1) {
@@ -744,7 +979,7 @@ export const Workbench = () => {
             }
           }
           updateMessage(assistantMessageId, {
-            content: accumulatedContent,
+            content: buildStreamingContent(),
             status: 'sending',
             toolCalls: [...currentToolCalls]
           })
@@ -759,7 +994,7 @@ export const Workbench = () => {
               data: { skills: matchedSkills },
             })
             updateMessage(assistantMessageId, {
-              content: accumulatedContent,
+              content: buildStreamingContent(),
               status: 'sending',
               toolCalls: [...currentToolCalls]
             })
@@ -779,7 +1014,7 @@ export const Workbench = () => {
             message: chunk.message || '技能策略校验未通过',
           })
           updateMessage(assistantMessageId, {
-            content: accumulatedContent,
+            content: buildStreamingContent(),
             status: 'sending',
             toolCalls: [...currentToolCalls]
           })
@@ -795,8 +1030,9 @@ export const Workbench = () => {
             kind: 'system',
             message: snapshotMessage
           })
+          markProgress('技能快照已加载')
           updateMessage(assistantMessageId, {
-            content: accumulatedContent,
+            content: buildStreamingContent(),
             status: 'sending',
             toolCalls: [...currentToolCalls]
           })
@@ -820,7 +1056,7 @@ export const Workbench = () => {
               data: { count: memories.length },
             })
             updateMessage(assistantMessageId, {
-              content: accumulatedContent,
+              content: buildStreamingContent(),
               status: 'sending',
               toolCalls: [...currentToolCalls]
             })
@@ -841,7 +1077,7 @@ export const Workbench = () => {
             message: '\u8d85\u957f\u5bf9\u8bdd\u9884\u5904\u7406\u4e2d...'
           })
           updateMessage(assistantMessageId, {
-            content: accumulatedContent,
+            content: buildStreamingContent(),
             status: 'sending',
             toolCalls: [...currentToolCalls]
           })
@@ -865,7 +1101,7 @@ export const Workbench = () => {
             }
           }
           updateMessage(assistantMessageId, {
-            content: accumulatedContent,
+            content: buildStreamingContent(),
             status: 'sending',
             toolCalls: [...currentToolCalls]
           })
@@ -896,8 +1132,9 @@ export const Workbench = () => {
               message: errorMessage
             })
           }
+          markProgress('记忆预处理失败，降级继续')
           updateMessage(assistantMessageId, {
-            content: accumulatedContent,
+            content: buildStreamingContent(),
             status: 'sending',
             toolCalls: [...currentToolCalls]
           })
@@ -907,11 +1144,12 @@ export const Workbench = () => {
             progress: clampProgress(Math.max(prev.progress, 48)),
           }))
           // Web search started - update message to show searching state
+          markProgress('正在联网搜索最新信息')
           if (!accumulatedContent.trim()) {
             accumulatedContent = '\u6b63\u5728\u641c\u7d22\u6700\u65b0\u4fe1\u606f...'
           }
           updateMessage(assistantMessageId, {
-            content: accumulatedContent,
+            content: buildStreamingContent(),
             status: 'sending',
             isSearching: true
           })
@@ -920,6 +1158,7 @@ export const Workbench = () => {
             label: '\u8054\u7f51\u68c0\u7d22\u5b8c\u6210',
             progress: clampProgress(Math.max(prev.progress, 68)),
           }))
+          markProgress('联网搜索完成，正在整理结果')
           // Web search completed - store results for the message
           if (chunk.results && chunk.results.length > 0) {
             currentSearchResults = chunk.results
@@ -937,6 +1176,7 @@ export const Workbench = () => {
             label: '\u8054\u7f51\u68c0\u7d22\u5f02\u5e38\uff0c\u6539\u4e3a\u65e0\u641c\u7d22\u7ee7\u7eed',
             progress: clampProgress(Math.max(prev.progress, 68)),
           }))
+          markProgress('联网搜索异常，转为离线整理')
           // Web search error - don't stop, just log and continue
           updateMessage(assistantMessageId, {
             isSearching: false
@@ -950,14 +1190,14 @@ export const Workbench = () => {
           // Fallback for direct content
           accumulatedContent += chunk.content
           updateMessage(assistantMessageId, {
-            content: accumulatedContent,
+            content: buildStreamingContent(),
             status: 'sending'
           })
         } else if (chunk.message) {
           // Fallback for message field
           accumulatedContent += chunk.message
           updateMessage(assistantMessageId, {
-            content: accumulatedContent,
+            content: buildStreamingContent(),
             status: 'sending'
           })
         }
@@ -975,6 +1215,7 @@ export const Workbench = () => {
       })
       // Mark as sent when stream completes
       updateMessage(assistantMessageId, {
+        content: accumulatedContent || buildStreamingContent(),
         status: 'sent',
         isSearching: false,
         searchResults: currentSearchResults.length > 0 ? currentSearchResults : undefined,
@@ -991,6 +1232,7 @@ export const Workbench = () => {
       if (streamStartedAt) {
         setLastRunDurationSec(Math.max(1, Math.floor((Date.now() - streamStartedAt) / 1000)))
       }
+      await loadAutonomyEvents()
       setStreaming(false)
       setStreamStartedAt(null)
       setTimeout(() => setStreamPhase({ label: '\u51c6\u5907\u4e2d', progress: 5 }), 600)
@@ -1008,10 +1250,12 @@ export const Workbench = () => {
     activeSessionOrganizationId,
     commanderMode,
     responseMode,
+    executionNodeId,
     approvalPolicy,
     resolveApprovalPolicyForTool,
     preferredSkill,
     skillStrict,
+    loadAutonomyEvents,
     streamStartedAt,
     refreshPendingApprovals,
   ])
@@ -1033,6 +1277,19 @@ export const Workbench = () => {
     }
     return false
   }, [messages])
+  const autonomyStageStats = useMemo(() => {
+    const counts: Record<string, number> = {}
+    for (const evt of autonomyEvents) {
+      const key = String(evt.stage || 'execute').toLowerCase()
+      counts[key] = (counts[key] || 0) + 1
+    }
+    return counts
+  }, [autonomyEvents])
+  const autonomyRecentEvents = useMemo(() => autonomyEvents.slice(-30), [autonomyEvents])
+  const autonomyFallbackChain = useMemo(
+    () => autonomyRecentEvents.filter((evt) => String(evt.stage || '').toLowerCase() === 'fallback').slice(-6),
+    [autonomyRecentEvents]
+  )
   useEffect(() => {
     const searchParams = new URLSearchParams(location.search)
     const rawTaskId = (searchParams.get('channel_task_id') || '').trim()
@@ -1074,13 +1331,6 @@ export const Workbench = () => {
     desktop: '\u684c\u9762',
     mcp: '\u534f\u8bae',
     other: '\u5de5\u5177',
-  }
-  const statusLabelMap: Record<ToolCallInfo['status'], string> = {
-    running: '\u6267\u884c\u4e2d',
-    success: '\u6210\u529f',
-    error: '\u5931\u8d25',
-    pending_approval: '\u5f85\u5ba1\u6279',
-    denied: '\u5df2\u62d2\u7edd',
   }
   const filteredTimelineCalls = useMemo(() => {
     if (!timelineSkillFilter) return activeTimelineCalls
@@ -1402,6 +1652,87 @@ export const Workbench = () => {
       setAuditWritebackMessage(`回写失败：${reason}`)
     }
   }, [activeGoalTaskId, buildCommanderReportLines])
+  const markCurrentTaskDone = useCallback(async () => {
+    if (!activeGoalTaskId) return
+    setAuditWritebackState('saving')
+    setAuditWritebackMessage('')
+    try {
+      const readiness = await AgentService.getGoalTaskExecutionReadiness(activeGoalTaskId, currentOrganizationId)
+      if (!readiness?.success || !readiness.data) {
+        throw new Error(readiness?.error || '任务执行就绪校验失败')
+      }
+      if (!readiness.data.can_complete) {
+        const failedChecks = readiness.data.checks
+          .filter((item) => !item.ok)
+          .map((item) => `- ${item.key}: ${item.detail}`)
+          .join('\n')
+        throw new Error(`执行证据不足，暂不允许完成。\n${failedChecks}`)
+      }
+      const result = await AgentService.completeGoalTask(activeGoalTaskId)
+      if (!result?.success) throw new Error(result?.error || '更新任务状态失败')
+      setAuditWritebackState('done')
+      setAuditWritebackMessage(`任务 #${activeGoalTaskId} 已标记为完成，等待验收。`)
+      const refreshed = await AgentService.listGoalTasks({ organizationId: currentOrganizationId, taskId: activeGoalTaskId, limit: 1 })
+      if (refreshed?.success && refreshed.tasks?.[0]) setActiveTaskContext(refreshed.tasks[0])
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      setAuditWritebackState('error')
+      setAuditWritebackMessage(`标记完成失败：${reason}`)
+    }
+  }, [activeGoalTaskId, currentOrganizationId])
+  const acceptCurrentTask = useCallback(async () => {
+    if (!activeGoalTaskId) return
+    setAuditWritebackState('saving')
+    setAuditWritebackMessage('')
+    try {
+      const readiness = await AgentService.getGoalTaskExecutionReadiness(activeGoalTaskId, currentOrganizationId)
+      if (!readiness?.success || !readiness.data) {
+        throw new Error(readiness?.error || '任务执行就绪校验失败')
+      }
+      if (readiness.data.execution_count <= 0) {
+        throw new Error('缺少执行日志，不允许直接验收。')
+      }
+      const reviewer = profile?.userName?.trim() || 'owner'
+      const result = await AgentService.reviewGoalTask(activeGoalTaskId, 'accept', '自动验收通过', reviewer)
+      if (!result?.success) throw new Error(result?.error || '验收失败')
+      setAuditWritebackState('done')
+      setAuditWritebackMessage(`任务 #${activeGoalTaskId} 已验收通过，并回流项目/OKR/KPI进度。`)
+      const refreshed = await AgentService.listGoalTasks({ organizationId: currentOrganizationId, taskId: activeGoalTaskId, limit: 1 })
+      if (refreshed?.success && refreshed.tasks?.[0]) setActiveTaskContext(refreshed.tasks[0])
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      setAuditWritebackState('error')
+      setAuditWritebackMessage(`验收失败：${reason}`)
+    }
+  }, [activeGoalTaskId, currentOrganizationId, profile?.userName])
+  const handoffCurrentTaskToHuman = useCallback(async () => {
+    if (!activeGoalTaskId) return
+    setAuditWritebackState('saving')
+    setAuditWritebackMessage('')
+    try {
+      const reviewer = profile?.userName?.trim() || 'owner'
+      const result = await AgentService.reviewGoalTask(
+        activeGoalTaskId,
+        'reject',
+        '自动转人工：需要老板接管处理',
+        reviewer
+      )
+      if (!result?.success) {
+        throw new Error(result?.error || '转人工失败')
+      }
+      setAuditWritebackState('done')
+      setAuditWritebackMessage(`任务 #${activeGoalTaskId} 已转人工处理，已同步到AI公司看板返工池。`)
+      navigate(`/board?task_id=${activeGoalTaskId}&assignee=${encodeURIComponent(reviewer)}&organization_id=${encodeURIComponent(currentOrganizationId)}`)
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      setAuditWritebackState('error')
+      setAuditWritebackMessage(`转人工失败：${reason}`)
+    }
+  }, [activeGoalTaskId, currentOrganizationId, navigate, profile?.userName])
+  const replayCurrentTaskAudit = useCallback(() => {
+    if (!activeGoalTaskId) return
+    void handleSendMessage(`请回放任务 #${activeGoalTaskId} 的审计与执行日志，输出失败点、风险、修复步骤和下一步动作。`)
+  }, [activeGoalTaskId, handleSendMessage])
   const historyToolOptions = useMemo(() => {
     const set = new Set<string>()
     for (const item of approvalHistory) {
@@ -1478,85 +1809,135 @@ export const Workbench = () => {
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col min-h-0">
         {/* Header */}
-        <div className="h-14 border-b border-neutral-800 flex items-center px-6 flex-shrink-0">
-          <div className="flex-1">
-            <h1 className="text-base font-semibold text-white">{'\u5de5\u4f5c\u53f0'}</h1>
-            <p className="text-xs text-neutral-600 mt-0.5">{'CKS \u667a\u80fd\u5bf9\u8bdd'}</p>
-          </div>
-          <div className="mr-3 flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setTopPanelsCollapsed((v) => !v)}
-              className="text-[11px] px-2 py-1 rounded border border-neutral-700 text-neutral-300 hover:border-neutral-500"
-            >
-              {topPanelsCollapsed ? '展开顶部面板' : '折叠顶部面板'}
-            </button>
-            <label className="flex items-center gap-1 text-[11px] text-cyan-300 border border-cyan-500/40 rounded px-2 py-1 bg-cyan-500/10">
-              <input
-                type="checkbox"
-                checked={commanderMode}
-                onChange={(e) => setCommanderMode(e.target.checked)}
-                className="accent-cyan-500"
-              />
-              {'AI总指挥'}
-            </label>
-            <label className="flex items-center gap-1 text-[11px] text-emerald-300 border border-emerald-500/40 rounded px-2 py-1 bg-emerald-500/10">
-              <span>响应策略</span>
-              <select
-                value={responseMode}
-                onChange={(e) => setResponseMode((e.target.value as 'fast' | 'balanced' | 'deep') || 'fast')}
-                className="bg-black/50 border border-emerald-500/30 text-[11px] text-emerald-100 rounded px-1.5 py-0.5"
-              >
-                <option value="fast">极速</option>
-                <option value="balanced">平衡</option>
-                <option value="deep">深度</option>
-              </select>
-            </label>
-            {!commanderMode && (
-              <>
-                <span className="text-xs text-neutral-500">{'\u6280\u80fd\u4f18\u5148'}</span>
-                <select
-                  value={preferredSkill}
-                  onChange={(e) => setPreferredSkill(e.target.value)}
-                  className="bg-neutral-900 border border-neutral-700 text-xs text-neutral-200 rounded px-2 py-1"
+        <div className="border-b border-neutral-800 px-4 py-2 md:px-6 flex-shrink-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex-1 min-w-[240px]">
+              <h1 className="text-base font-semibold text-white">{'\u5de5\u4f5c\u53f0'}</h1>
+              <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px]">
+                <span className="text-neutral-500">{'CKS \u667a\u80fd\u5bf9\u8bdd'}</span>
+                {activeGoalTaskId ? (
+                  <span className="px-1.5 py-0.5 rounded border border-cyan-500/40 bg-cyan-500/10 text-cyan-200">
+                    任务 #{activeGoalTaskId}
+                  </span>
+                ) : null}
+                {executionNodeId ? (
+                  <span className="px-1.5 py-0.5 rounded border border-indigo-500/40 bg-indigo-500/10 text-indigo-200">
+                    节点 {executionNodeId}
+                  </span>
+                ) : null}
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {executionNodeId ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExecutionNodeId('')
+                    localStorage.removeItem('cks.workbench.executionNodeId')
+                  }}
+                  className="cks-btn cks-btn-secondary cks-focus-ring text-[11px] border-indigo-500/40 text-indigo-200 hover:bg-indigo-500/10"
+                  title="清除当前节点绑定"
                 >
-                  <option value="">{'\u81ea\u52a8\u5224\u65ad'}</option>
-                  {availableSkills.map((skill) => (
-                    <option key={skill.name} value={skill.name}>
-                      {skill.display_name || skill.name}
-                    </option>
-                  ))}
-                </select>
-                <label className="flex items-center gap-1 text-[11px] text-neutral-400">
-                  <input
-                    type="checkbox"
-                    checked={skillStrict}
-                    onChange={(e) => setSkillStrict(e.target.checked)}
-                    className="accent-cyan-500"
-                  />
-                  {'严格模式'}
+                  清除节点绑定
+                </button>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => setTopPanelsCollapsed((v) => !v)}
+                className="cks-btn cks-btn-secondary cks-focus-ring text-[11px]"
+              >
+                {topPanelsCollapsed ? '展开顶部面板' : '折叠顶部面板'}
+              </button>
+              {!topPanelsCollapsed && (
+                <button
+                  type="button"
+                  onClick={() => setShowHeaderAdvanced((v) => !v)}
+                  className="cks-btn cks-btn-secondary cks-focus-ring text-[11px]"
+                >
+                  {showHeaderAdvanced ? '收起设置' : '更多设置'}
+                </button>
+              )}
+              <label className="flex items-center gap-1 text-[11px] text-cyan-300 border border-cyan-500/40 rounded px-2 py-1 bg-cyan-500/10">
+                <input
+                  type="checkbox"
+                  checked={commanderMode}
+                  onChange={(e) => setCommanderMode(e.target.checked)}
+                  className="accent-cyan-500"
+                />
+                {'AI总指挥'}
+              </label>
+              {!topPanelsCollapsed && showHeaderAdvanced && (
+                <label className="flex items-center gap-1 text-[11px] text-emerald-300 border border-emerald-500/40 rounded px-2 py-1 bg-emerald-500/10">
+                  <span>响应策略</span>
+                  <select
+                    value={responseMode}
+                    onChange={(e) => setResponseMode((e.target.value as 'fast' | 'balanced' | 'deep') || 'fast')}
+                    className="cks-select px-1.5 py-0.5 text-[11px] text-emerald-100 border-emerald-500/30 bg-emerald-500/10"
+                  >
+                    <option value="fast">极速</option>
+                    <option value="balanced">平衡</option>
+                    <option value="deep">深度</option>
+                  </select>
                 </label>
-              </>
-            )}
+              )}
+              {!commanderMode && !topPanelsCollapsed && showHeaderAdvanced && (
+                <>
+                  <span className="text-xs text-neutral-500">{'\u6280\u80fd\u4f18\u5148'}</span>
+                  <select
+                    value={preferredSkill}
+                    onChange={(e) => setPreferredSkill(e.target.value)}
+                    className="cks-select px-2 py-1 text-xs text-neutral-200"
+                  >
+                    <option value="">{'\u81ea\u52a8\u5224\u65ad'}</option>
+                    {availableSkills.map((skill) => (
+                      <option key={skill.name} value={skill.name}>
+                        {skill.display_name || skill.name}
+                      </option>
+                    ))}
+                  </select>
+                  <label className="flex items-center gap-1 text-[11px] text-neutral-400">
+                    <input
+                      type="checkbox"
+                      checked={skillStrict}
+                      onChange={(e) => setSkillStrict(e.target.checked)}
+                      className="accent-cyan-500"
+                    />
+                    {'严格模式'}
+                  </label>
+                </>
+              )}
+            </div>
           </div>
           {activeGoalTaskId && (
-            <div className="text-xs text-blue-300 bg-blue-500/10 border border-blue-500/30 rounded px-2 py-1">
+            <div className="mt-2 inline-flex text-xs text-blue-300 bg-blue-500/10 border border-blue-500/30 rounded px-2 py-1">
               {'\u5df2\u7ed1\u5b9a\u76ee\u6807\u4efb\u52a1'} #{activeGoalTaskId}{'\uff08\u5b8c\u6210\u540e\u81ea\u52a8\u56de\u5199\uff09'}
             </div>
           )}
         </div>
-        <div className="border-b border-neutral-900 bg-neutral-950/60 px-6 py-2">
+        {!topPanelsCollapsed && (
+        <div className="mx-4 mt-2 cks-surface-subtle px-3 py-2 md:mx-6 md:px-4">
           <div className="flex flex-wrap items-center gap-2 text-[11px]">
-            <span className="text-neutral-500">执行审批策略</span>
-            <select
-              value={approvalPolicy}
-              onChange={(e) => setApprovalPolicy((e.target.value as 'always' | 'high-only' | 'never') || 'always')}
-              className="bg-neutral-900 border border-neutral-700 text-neutral-200 rounded px-2 py-1"
-            >
-              <option value="always">中高风险需审批</option>
-              <option value="high-only">仅高风险审批</option>
-              <option value="never">仅审计不拦截</option>
-            </select>
+            {topPanelsCollapsed ? (
+              <>
+                <span className="text-neutral-500">审批策略：{approvalPolicyLabel[approvalPolicy]}</span>
+                <span className="px-2 py-1 rounded border border-neutral-700 bg-neutral-900 text-neutral-300">
+                  待审批 {pendingApprovals.length}
+                </span>
+              </>
+            ) : (
+              <>
+                <span className="text-neutral-500">执行审批策略</span>
+                <select
+                  value={approvalPolicy}
+                  onChange={(e) => setApprovalPolicy((e.target.value as 'always' | 'high-only' | 'never') || 'always')}
+                  className="cks-select px-2 py-1 text-neutral-200"
+                >
+                  <option value="always">中高风险需审批</option>
+                  <option value="high-only">仅高风险审批</option>
+                  <option value="never">仅审计不拦截</option>
+                </select>
+              </>
+            )}
             <button
               type="button"
               onClick={() => {
@@ -1565,26 +1946,33 @@ export const Workbench = () => {
                   refreshPendingApprovals()
                 }
               }}
-              className="px-2 py-1 rounded border border-neutral-700 text-neutral-300 hover:border-neutral-500"
+              className="cks-btn cks-btn-secondary"
             >
-              审批中心（待处理 {pendingApprovals.length}）
+              {topPanelsCollapsed ? '审批中心' : `审批中心（待处理 ${pendingApprovals.length}）`}
             </button>
-            <button
-              type="button"
-              onClick={refreshPendingApprovals}
-              className="px-2 py-1 rounded border border-neutral-700 text-neutral-400 hover:text-neutral-200"
-            >
-              刷新
-            </button>
-            <select
-              value={approvalScope}
-              onChange={(e) => setApprovalScope((e.target.value as 'org' | 'session') || 'org')}
-              className="bg-neutral-900 border border-neutral-700 text-neutral-200 rounded px-2 py-1"
-            >
-              <option value="org">组织范围</option>
-              <option value="session">当前会话</option>
-            </select>
-            <span className="text-neutral-500">当前策略：{approvalPolicyLabel[approvalPolicy]}</span>
+            {!topPanelsCollapsed && (
+              <>
+                <MoreActions
+                  label="更多"
+                  items={[
+                    {
+                      key: 'refresh-approvals',
+                      label: '刷新审批数据',
+                      onClick: refreshPendingApprovals,
+                    },
+                  ]}
+                />
+                <select
+                  value={approvalScope}
+                  onChange={(e) => setApprovalScope((e.target.value as 'org' | 'session') || 'org')}
+                  className="cks-select px-2 py-1 text-neutral-200"
+                >
+                  <option value="org">组织范围</option>
+                  <option value="session">当前会话</option>
+                </select>
+                <span className="text-neutral-500">当前策略：{approvalPolicyLabel[approvalPolicy]}</span>
+              </>
+            )}
             {approvalError ? <span className="text-red-300">审批中心异常：{approvalError}</span> : null}
           </div>
           {approvalPanelExpanded && (
@@ -1598,7 +1986,7 @@ export const Workbench = () => {
                       <select
                         value={toolPolicyMap[tool] || 'inherit'}
                         onChange={(e) => updateToolPolicy(tool, (e.target.value as 'inherit' | 'always' | 'high-only' | 'never') || 'inherit')}
-                        className="bg-neutral-900 border border-neutral-700 text-[11px] text-neutral-200 rounded px-1.5 py-0.5"
+                        className="cks-select px-1.5 py-0.5 text-[11px] text-neutral-200"
                       >
                         <option value="inherit">跟随全局</option>
                         <option value="always">中高风险审批</option>
@@ -1612,13 +2000,18 @@ export const Workbench = () => {
               <div>
                 <div className="mb-1 text-[11px] text-neutral-500">待处理审批</div>
                 {pendingApprovals.length === 0 ? (
-                  <div className="text-[11px] text-neutral-500">当前没有待审批项。</div>
+                  <EmptyState title="当前没有待审批项" className="py-3 text-[11px]" />
                 ) : (
                   pendingApprovals.map((approval) => (
                     <div key={approval.id} className="mb-2 rounded border border-neutral-800 bg-black/40 p-2 last:mb-0">
                       <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div className="text-[11px] text-neutral-300">
-                          {formatToolLabel(approval.tool_name)} · {approval.risk_level} · {approvalStatusLabel[approval.status] || approval.status}
+                        <div className="text-[11px] text-neutral-300 flex items-center gap-1.5">
+                          <span>{formatToolLabel(approval.tool_name)}</span>
+                          <span className="text-neutral-500">· {approval.risk_level}</span>
+                          <StatusBadge
+                            label={getApprovalStatusMeta(approval.status).label}
+                            className={getApprovalStatusMeta(approval.status).badgeClassName}
+                          />
                         </div>
                         <div className="flex items-center gap-1">
                           <button
@@ -1653,7 +2046,7 @@ export const Workbench = () => {
                   <select
                     value={historyStatusFilter}
                     onChange={(e) => setHistoryStatusFilter((e.target.value as 'all' | 'approved' | 'denied' | 'expired') || 'all')}
-                    className="bg-neutral-900 border border-neutral-700 text-[11px] text-neutral-200 rounded px-1.5 py-0.5"
+                    className="cks-select px-1.5 py-0.5 text-[11px] text-neutral-200"
                   >
                     <option value="all">全部状态</option>
                     <option value="approved">仅已批准</option>
@@ -1663,7 +2056,7 @@ export const Workbench = () => {
                   <select
                     value={historyToolFilter}
                     onChange={(e) => setHistoryToolFilter(e.target.value || 'all')}
-                    className="bg-neutral-900 border border-neutral-700 text-[11px] text-neutral-200 rounded px-1.5 py-0.5"
+                    className="cks-select px-1.5 py-0.5 text-[11px] text-neutral-200"
                   >
                     <option value="all">全部工具</option>
                     {historyToolOptions.map((tool) => (
@@ -1674,23 +2067,31 @@ export const Workbench = () => {
                     value={historyDeciderFilter}
                     onChange={(e) => setHistoryDeciderFilter(e.target.value)}
                     placeholder="按处理人筛选"
-                    className="bg-neutral-900 border border-neutral-700 text-[11px] text-neutral-200 rounded px-2 py-0.5 w-28"
+                    className="cks-input px-2 py-0.5 text-[11px] w-28"
                   />
-                  <button
-                    type="button"
-                    onClick={exportApprovalHistory}
-                    className="px-2 py-1 text-[11px] rounded border border-cyan-500/40 text-cyan-200 hover:bg-cyan-500/10"
-                  >
-                    导出CSV
-                  </button>
+                  <MoreActions
+                    label="更多"
+                    buttonClassName="text-[11px] px-2 py-1"
+                    items={[
+                      {
+                        key: 'export-approval-history',
+                        label: '导出 CSV',
+                        onClick: exportApprovalHistory,
+                      },
+                    ]}
+                  />
                 </div>
                 {filteredApprovalHistory.length === 0 ? (
-                  <div className="text-[11px] text-neutral-500">暂无审批历史记录。</div>
+                  <EmptyState title="暂无审批历史记录" className="py-3 text-[11px]" />
                 ) : (
                   filteredApprovalHistory.map((approval) => (
                     <div key={approval.id} className="mb-2 rounded border border-neutral-800/80 bg-black/20 p-2 last:mb-0">
-                      <div className="text-[11px] text-neutral-300">
-                        {formatToolLabel(approval.tool_name)} · {approvalStatusLabel[approval.status] || approval.status}
+                      <div className="text-[11px] text-neutral-300 flex items-center gap-1.5">
+                        <span>{formatToolLabel(approval.tool_name)}</span>
+                        <StatusBadge
+                          label={getApprovalStatusMeta(approval.status).label}
+                          className={getApprovalStatusMeta(approval.status).badgeClassName}
+                        />
                       </div>
                       <div className="mt-1 text-[10px] text-neutral-500">
                         处理人：{approval.decided_by || 'system'} ｜ 时间：{formatAuditTime(approval.updated_at || approval.created_at)}
@@ -1705,25 +2106,6 @@ export const Workbench = () => {
             </div>
           )}
         </div>
-        {topPanelsCollapsed && (
-          <div className="border-b border-neutral-900 bg-neutral-950/60 px-6 py-2">
-            <div className="flex flex-wrap items-center gap-2 text-[11px]">
-              <span className="px-2 py-1 rounded border border-neutral-700 bg-neutral-900 text-neutral-300">顶部面板已折叠</span>
-              <span className={`px-2 py-1 rounded border ${isStreaming ? 'border-cyan-500/30 bg-cyan-500/10 text-cyan-200' : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'}`}>
-                {isStreaming ? '执行中' : '空闲'}
-              </span>
-              {skillPolicyError ? (
-                <span className="px-2 py-1 rounded border border-amber-500/30 bg-amber-500/10 text-amber-200">有策略拦截提示</span>
-              ) : null}
-              <button
-                type="button"
-                onClick={() => setTopPanelsCollapsed(false)}
-                className="ml-auto text-[11px] px-2 py-1 rounded border border-neutral-700 text-neutral-300 hover:border-neutral-500"
-              >
-                展开顶部面板
-              </button>
-            </div>
-          </div>
         )}
         {!topPanelsCollapsed && skillPolicyError && (
           <div className="border-b border-amber-500/30 bg-amber-500/10 px-6 py-2">
@@ -1735,14 +2117,14 @@ export const Workbench = () => {
                 <button
                   type="button"
                   onClick={() => setSkillStrict(false)}
-                  className="text-[11px] px-2 py-1 rounded border border-amber-400/40 text-amber-100 hover:bg-amber-500/10"
+                  className="cks-btn cks-btn-secondary text-[11px] border-amber-400/40 text-amber-100 hover:bg-amber-500/10"
                 >
                   关闭严格模式
                 </button>
                 <button
                   type="button"
                   onClick={() => setSkillPolicyError(null)}
-                  className="text-[11px] px-2 py-1 rounded border border-neutral-700 text-neutral-300 hover:border-neutral-500"
+                  className="text-[11px] cks-btn cks-btn-secondary"
                 >
                   收起提示
                 </button>
@@ -1751,7 +2133,7 @@ export const Workbench = () => {
           </div>
         )}
         {!topPanelsCollapsed && (commanderMode || preferredSkill || activeTimelineCalls.length > 0 || skillPolicyError) && (
-          <div className="border-b border-neutral-900 bg-neutral-950/60 px-6 py-2">
+          <div className="mx-4 mt-2 cks-surface-subtle px-3 py-2 md:mx-6 md:px-4">
             <div className="text-[11px] text-neutral-400">本轮技能决策说明</div>
             <div className="mt-1 flex flex-wrap gap-2">
               {skillDecisionSummary.map((line, index) => (
@@ -1766,7 +2148,7 @@ export const Workbench = () => {
           </div>
         )}
         {!topPanelsCollapsed && commanderMode && (
-          <div className="border-b border-neutral-900 bg-gradient-to-r from-cyan-950/20 via-neutral-950 to-neutral-950 px-6 py-3">
+          <div className="mx-4 mt-2 border border-cyan-900/40 bg-gradient-to-r from-cyan-950/20 via-neutral-950 to-neutral-950 rounded-[10px] px-3 py-3 md:mx-6 md:px-4">
             <div className="flex items-center justify-between gap-3">
               <div>
                 <div className="text-xs text-cyan-300">AI 总指挥执行面板</div>
@@ -1815,7 +2197,97 @@ export const Workbench = () => {
           </div>
         )}
         {!topPanelsCollapsed && commanderMode && !isStreaming && (commanderSummary.total > 0 || commanderDeliverables.length > 0) && (
-          <div className="border-b border-neutral-900 bg-neutral-950/80 px-6 py-2.5">
+          <div className="mx-4 mt-2 cks-surface-subtle px-3 py-2.5 md:mx-6 md:px-4">
+            {activeGoalTaskId ? (
+              <div className="mb-2 rounded border border-cyan-500/30 bg-cyan-500/5 p-2">
+                <div className="text-[11px] text-cyan-200">
+                  目标链路：KPI / OKR / 项目 / 任务 #{activeGoalTaskId}
+                </div>
+                {activeTaskContextLoading ? (
+                  <SectionLoading label="正在同步链路信息..." className="mt-1 py-1 text-[11px] justify-start" />
+                ) : activeTaskContext ? (
+                  <>
+                    <div className="mt-1 text-[11px] text-neutral-300 break-all">
+                      {activeTaskContext.kpi_title} / {activeTaskContext.okr_title} / {activeTaskContext.project_title} / {activeTaskContext.title}
+                    </div>
+                    <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-neutral-500">
+                      <span>负责人 {activeTaskContext.assignee || '-'}</span>
+                      <StatusBadge
+                        label={getTaskStatusMeta(activeTaskContext.status || '').label}
+                        className={getTaskStatusMeta(activeTaskContext.status || '').badgeClassName}
+                      />
+                      <StatusBadge
+                        label={getReviewStatusMeta(activeTaskContext.review_status).label}
+                        className={getReviewStatusMeta(activeTaskContext.review_status).badgeClassName}
+                      />
+                    </div>
+                  </>
+                ) : (
+                  <div className="mt-1 text-[11px] text-amber-300">{activeTaskContextError || '未获取到链路信息'}</div>
+                )}
+                <div className="mt-2 rounded border border-neutral-800 bg-black/30 px-2 py-1.5 text-[11px]">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-neutral-400">执行就绪</span>
+                    {taskReadinessLoading ? (
+                      <span className="text-neutral-400">校验中...</span>
+                    ) : taskReadiness ? (
+                      <span className={taskReadiness.can_complete ? 'text-emerald-300' : 'text-amber-300'}>
+                        {taskReadiness.can_complete ? '可完成/可验收' : '证据不足，建议继续执行'}
+                      </span>
+                    ) : (
+                      <span className="text-rose-300">{taskReadinessError || '未知'}</span>
+                    )}
+                    {taskReadiness ? (
+                      <>
+                        <span className="text-neutral-500">执行 {taskReadiness.execution_count}</span>
+                        <span className="text-neutral-500">错误 {taskReadiness.error_count}</span>
+                      </>
+                    ) : null}
+                  </div>
+                  {taskReadiness && taskReadiness.checks.length > 0 ? (
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {taskReadiness.checks.slice(0, 4).map((item) => (
+                        <span
+                          key={item.key}
+                          className={`px-1.5 py-0.5 rounded border ${
+                            item.ok ? 'border-emerald-500/30 text-emerald-300' : 'border-amber-500/30 text-amber-300'
+                          }`}
+                          title={item.detail}
+                        >
+                          {item.ok ? '✓' : '!'} {item.key}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={markCurrentTaskDone}
+                    disabled={auditWritebackState === 'saving'}
+                    className="cks-btn cks-btn-secondary text-[11px] border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50"
+                  >
+                    标记任务完成
+                  </button>
+                  <button
+                    type="button"
+                    onClick={acceptCurrentTask}
+                    disabled={auditWritebackState === 'saving'}
+                    className="cks-btn cks-btn-secondary text-[11px] border-blue-500/40 text-blue-200 hover:bg-blue-500/10 disabled:opacity-50"
+                  >
+                    验收通过（回流链路）
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handoffCurrentTaskToHuman}
+                    disabled={auditWritebackState === 'saving'}
+                    className="cks-btn cks-btn-secondary text-[11px] border-amber-500/40 text-amber-200 hover:bg-amber-500/10 disabled:opacity-50"
+                  >
+                    转人工处理
+                  </button>
+                </div>
+              </div>
+            ) : null}
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-xs text-neutral-300">交付报告</span>
               <span className="text-[11px] px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-200">耗时 {lastRunDurationSec || 0}s</span>
@@ -1833,33 +2305,42 @@ export const Workbench = () => {
               <button
                 type="button"
                 onClick={() => handleSendMessage('请基于刚才的执行结果，输出一份可直接验收的总结报告（完成项/未完成项/风险/下一步）。')}
-                className="text-[11px] px-2 py-1 rounded border border-cyan-500/40 text-cyan-200 hover:bg-cyan-500/10"
+                className="cks-btn cks-btn-primary cks-focus-ring cks-transition-fast text-[11px]"
               >
                 生成验收报告
               </button>
               <button
                 type="button"
                 onClick={() => handleSendMessage('请继续推进未完成部分，并优先交付可验证结果。')}
-                className="text-[11px] px-2 py-1 rounded border border-neutral-700 text-neutral-300 hover:border-neutral-500"
+                className="cks-btn cks-btn-secondary cks-focus-ring cks-transition-fast text-[11px]"
               >
                 继续执行未完成项
               </button>
               <button
                 type="button"
                 onClick={exportCommanderReport}
-                className="text-[11px] px-2 py-1 rounded border border-purple-500/40 text-purple-200 hover:bg-purple-500/10"
+                className="cks-btn cks-btn-secondary cks-focus-ring cks-transition-fast text-[11px] border-purple-500/40 text-purple-200 hover:bg-purple-500/10"
               >
                 导出交付报告
               </button>
               {activeGoalTaskId ? (
-                <button
-                  type="button"
-                  onClick={writebackCommanderReportToTask}
-                  disabled={auditWritebackState === 'saving'}
-                  className="text-[11px] px-2 py-1 rounded border border-blue-500/40 text-blue-200 hover:bg-blue-500/10 disabled:opacity-50"
-                >
-                  {auditWritebackState === 'saving' ? '回写中...' : `回写任务 #${activeGoalTaskId}`}
-                </button>
+                <>
+                  <button
+                    type="button"
+                    onClick={writebackCommanderReportToTask}
+                    disabled={auditWritebackState === 'saving'}
+                    className="cks-btn cks-btn-primary cks-focus-ring cks-transition-fast text-[11px] disabled:opacity-50"
+                  >
+                    {auditWritebackState === 'saving' ? '回写中...' : `回写任务 #${activeGoalTaskId}`}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={replayCurrentTaskAudit}
+                    className="cks-btn cks-btn-secondary cks-focus-ring cks-transition-fast text-[11px] border-violet-500/40 text-violet-200 hover:bg-violet-500/10"
+                  >
+                    一键回放审计
+                  </button>
+                </>
               ) : null}
             </div>
             {auditWritebackMessage ? (
@@ -1869,8 +2350,8 @@ export const Workbench = () => {
             ) : null}
           </div>
         )}
-        {(timelineHasSearching || activeTimelineCalls.length > 0) && (
-          <div className="border-b border-neutral-900 bg-neutral-950/70 px-6 py-2">
+        {!topPanelsCollapsed && (timelineHasSearching || activeTimelineCalls.length > 0 || autonomyLoading || autonomyEvents.length > 0) && (
+          <div className="mx-4 mt-2 cks-surface-subtle px-3 py-2 md:mx-6 md:px-4">
             <div className="flex items-center justify-between">
               <div className="text-xs text-neutral-400">{commanderMode ? '技术详情（可展开）' : '\u6267\u884c\u65f6\u95f4\u7ebf'}</div>
               <div className="flex items-center gap-2">
@@ -1878,7 +2359,7 @@ export const Workbench = () => {
                   <select
                     value={timelineSkillFilter}
                     onChange={(e) => setTimelineSkillFilter(e.target.value)}
-                    className="bg-neutral-900 border border-neutral-700 text-[11px] text-neutral-200 rounded px-2 py-1"
+                    className="cks-select px-2 py-1 text-[11px] text-neutral-200"
                   >
                     <option value="">{'\u5168\u90e8\u6280\u80fd'}</option>
                     {availableSkills.map((skill) => (
@@ -1891,7 +2372,7 @@ export const Workbench = () => {
                 <button
                   type="button"
                   onClick={() => setTimelineExpanded((v) => !v)}
-                  className="text-[11px] px-2 py-1 rounded border border-neutral-700 text-neutral-300 hover:border-neutral-500"
+                  className="text-[11px] cks-btn cks-btn-secondary"
                 >
                   {timelineExpanded ? '\u6536\u8d77' : '\u5c55\u5f00'}
                 </button>
@@ -1900,21 +2381,32 @@ export const Workbench = () => {
 
             {!timelineExpanded && (
               <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
-                <span className="px-2 py-1 rounded border border-neutral-700 bg-neutral-900 text-neutral-300">调用 {activeTimelineCalls.length}</span>
+                <span className="px-2 py-1 rounded border border-neutral-700 bg-neutral-900 text-neutral-300">{'\u8c03\u7528'} {activeTimelineCalls.length}</span>
+                {autonomyLoading ? (
+                  <span className="px-2 py-1 rounded border border-cyan-500/30 bg-cyan-500/10 text-cyan-200">{'\u81ea\u6cbb\u8f68\u8ff9\u52a0\u8f7d\u4e2d'}</span>
+                ) : autonomyEvents.length > 0 ? (
+                  <span className="px-2 py-1 rounded border border-cyan-500/30 bg-cyan-500/10 text-cyan-200">{'\u81ea\u6cbb\u4e8b\u4ef6'} {autonomyEvents.length}</span>
+                ) : null}
+                {autonomyStageStats.fallback ? (
+                  <span className="px-2 py-1 rounded border border-amber-500/40 bg-amber-500/10 text-amber-200">{'\u9000\u8def'} {autonomyStageStats.fallback}</span>
+                ) : null}
+                {autonomyStageStats.clarify ? (
+                  <span className="px-2 py-1 rounded border border-indigo-500/40 bg-indigo-500/10 text-indigo-200">{'\u6f84\u6e05'} {autonomyStageStats.clarify}</span>
+                ) : null}
                 {linkedChannelTaskId ? (
                   <span className="px-2 py-1 rounded border border-fuchsia-500/40 bg-fuchsia-500/10 text-fuchsia-200">
-                    任务 #{linkedChannelTaskId} 关联步骤 {linkedTimelineIndices.length}
+                    {'\u4efb\u52a1'} #{linkedChannelTaskId} {'\u5173\u8054\u6b65\u9aa4'} {linkedTimelineIndices.length}
                   </span>
                 ) : null}
                 {activeSkillStats.total > 0 && (
-                  <span className="px-2 py-1 rounded border border-cyan-500/30 bg-cyan-500/10 text-cyan-200">技能 {activeSkillStats.total}</span>
+                  <span className="px-2 py-1 rounded border border-cyan-500/30 bg-cyan-500/10 text-cyan-200">{'\u6280\u80fd'} {activeSkillStats.total}</span>
                 )}
                 {runningCall ? (
                   <span className="px-2 py-1 rounded border border-amber-500/30 bg-amber-500/10 text-amber-200">
-                    当前：{formatToolLabel(runningCall.tool)}（{statusLabelMap[runningCall.status]}）
+                    {'\u5f53\u524d\uff1a'}{formatToolLabel(runningCall.tool)}{'\uff08'}{getToolRunStatusMeta(runningCall.status).label}{'\uff09'}
                   </span>
                 ) : (
-                  <span className="px-2 py-1 rounded border border-emerald-500/30 bg-emerald-500/10 text-emerald-300">本轮执行已结束</span>
+                  <span className="px-2 py-1 rounded border border-emerald-500/30 bg-emerald-500/10 text-emerald-300">{'\u672c\u8f6e\u6267\u884c\u5df2\u7ed3\u675f'}</span>
                 )}
               </div>
             )}
@@ -1926,7 +2418,7 @@ export const Workbench = () => {
                   <select
                     value={timelineSkillFilter}
                     onChange={(e) => setTimelineSkillFilter(e.target.value)}
-                    className="bg-neutral-900 border border-neutral-700 text-[11px] text-neutral-200 rounded px-2 py-1"
+                    className="cks-select px-2 py-1 text-[11px] text-neutral-200"
                   >
                     <option value="">{'\u5168\u90e8\u6280\u80fd'}</option>
                     {availableSkills.map((skill) => (
@@ -1971,14 +2463,21 @@ export const Workbench = () => {
                           : 'border-neutral-700 bg-neutral-900 text-neutral-300 hover:border-neutral-500'
                       }`}
                     >
-                      [{call.kind ? timelineLabelMap[call.kind] : '工具'}] {formatToolLabel(call.tool)} - {statusLabelMap[call.status]}
+                      [{call.kind ? timelineLabelMap[call.kind] : '工具'}] {formatToolLabel(call.tool)}
+                      <StatusBadge
+                        label={getToolRunStatusMeta(call.status).label}
+                        className={`ml-1 ${getToolRunStatusMeta(call.status).badgeClassName}`}
+                      />
                     </button>
                   ))}
                 </div>
 
                 {!displayedTimelineEntries.length && (
-                  <div className="mt-2 text-[11px] text-neutral-500">
-                    {timelineLinkedOnly ? '当前任务暂无可定位的关联步骤。' : '当前筛选下暂无技能调用记录。'}
+                  <div className="mt-2">
+                    <EmptyState
+                      title={timelineLinkedOnly ? '当前任务暂无可定位的关联步骤' : '当前筛选下暂无技能调用记录'}
+                      className="py-3 text-[11px]"
+                    />
                   </div>
                 )}
 
@@ -1986,7 +2485,7 @@ export const Workbench = () => {
                   <div className="mt-2 rounded border border-neutral-800 bg-neutral-900/70 p-2">
                     <div className="text-[11px] text-neutral-300">
                       <span className="text-neutral-500">{'\u5de5\u5177:'}</span> {formatToolLabel(activeTimelineCall.tool)}
-                      <span className="ml-2 text-neutral-500">{'\u72b6\u6001:'}</span> {statusLabelMap[activeTimelineCall.status]}
+                      <span className="ml-2 text-neutral-500">{'\u72b6\u6001:'}</span> {getToolRunStatusMeta(activeTimelineCall.status).label}
                       {activeTimelineCall.durationMs != null && activeTimelineCall.durationMs > 0 && (
                         <>
                           <span className="ml-2 text-neutral-500">耗时:</span> {formatDurationMs(activeTimelineCall.durationMs)}
@@ -2021,17 +2520,90 @@ export const Workbench = () => {
                     )}
                   </div>
                 )}
+
+                {autonomyEvents.length > 0 && (
+                  <div className="mt-2 rounded border border-cyan-500/20 bg-cyan-500/5 p-2">
+                    <div className="mb-1 flex items-center justify-between">
+                      <div className="text-[11px] text-cyan-200">自治执行回放</div>
+                      <button
+                        type="button"
+                        onClick={() => setAutonomyReplayExpanded((v) => !v)}
+                        className="text-[11px] cks-btn cks-btn-secondary"
+                      >
+                        {autonomyReplayExpanded ? '收起' : '展开'}
+                      </button>
+                    </div>
+                    {autonomyReplayExpanded && (
+                      <>
+                        <div className="mb-2 grid grid-cols-2 md:grid-cols-6 gap-1.5 text-[11px]">
+                          {['planning', 'clarify', 'execute', 'verify', 'fallback', 'deliver'].map((key) => (
+                            <div key={key} className="rounded border border-cyan-500/20 bg-neutral-900/70 px-2 py-1 text-neutral-300">
+                              <div className="text-cyan-200">{formatAutonomyStageLabel(key)}</div>
+                              <div>{autonomyStageStats[key] || 0}</div>
+                            </div>
+                          ))}
+                        </div>
+                        {autonomyFallbackChain.length > 0 && (
+                          <div className="mb-2 rounded border border-amber-500/30 bg-amber-500/10 p-2 text-[11px]">
+                            <div className="text-amber-200 mb-1">异常退路链路（最近）</div>
+                            <div className="space-y-1">
+                              {autonomyFallbackChain.map((evt) => (
+                                <div key={`fallback-${evt.id}`} className="text-amber-100/90 truncate">
+                                  {evt.created_at
+                                    ? new Date(evt.created_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+                                    : '-'}{' '}
+                                  - {evt.message}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        <div className="max-h-52 overflow-y-auto space-y-1 pr-1">
+                        {autonomyRecentEvents.map((evt) => {
+                          const meta = parseAutonomyMetadata(evt.metadata)
+                          const seq = typeof meta.seq === 'number' ? meta.seq : null
+                          const deltaMs = typeof meta.delta_ms === 'number' ? meta.delta_ms : null
+                          const stageKey = String(evt.stage || '').toLowerCase()
+                          const stageBadgeClass =
+                            stageKey === 'fallback'
+                              ? 'border-amber-500/40 bg-amber-500/15 text-amber-200'
+                              : stageKey === 'clarify'
+                                ? 'border-indigo-500/40 bg-indigo-500/15 text-indigo-200'
+                                : 'border-cyan-500/30 bg-cyan-500/10 text-cyan-200'
+                          return (
+                            <div key={evt.id} className="text-[11px] text-neutral-300 flex items-center justify-between gap-2">
+                              <span className={`px-1.5 py-0.5 rounded border whitespace-nowrap ${stageBadgeClass}`}>
+                                {formatAutonomyStageLabel(evt.stage)}
+                              </span>
+                              <span className="flex-1 truncate">
+                                {evt.message}
+                                {seq ? ` · #${seq}` : ''}
+                                {deltaMs != null ? ` · +${Math.round(deltaMs)}ms` : ''}
+                              </span>
+                              <span className="text-neutral-500 whitespace-nowrap">
+                                {evt.created_at
+                                  ? new Date(evt.created_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+                                  : '-'}
+                              </span>
+                            </div>
+                          )
+                        })}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
               </>
             )}
           </div>
         )}
 
         {isStreaming && (
-          <div className="border-b border-neutral-900 bg-neutral-950/70 px-6 py-2">
+          <div className="mx-4 mt-2 cks-surface-subtle px-3 py-2 md:mx-6 md:px-4">
             <div className="flex items-center justify-between gap-3 text-xs text-cyan-300">
               <span>
                 {'AI \u6b63\u5728\u6267\u884c\u4e2d - \u5df2\u8017\u65f6'} {streamElapsedSec}s
-                {runningCall ? ` - \u5f53\u524d\u6b65\u9aa4: ${formatToolLabel(runningCall.tool)} (${statusLabelMap[runningCall.status]})` : ''}
+                {runningCall ? ` - \u5f53\u524d\u6b65\u9aa4: ${formatToolLabel(runningCall.tool)} (${getToolRunStatusMeta(runningCall.status).label})` : ''}
                 {runningCallElapsedMs > 0 ? ` - 步骤耗时 ${formatDurationMs(runningCallElapsedMs)}` : ''}
               </span>
               <span className="text-cyan-200">{streamPhase.label}</span>

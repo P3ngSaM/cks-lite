@@ -8,9 +8,11 @@ import sys
 import re
 import json
 import time
+import asyncio
 import httpx
 from pathlib import Path
 from datetime import datetime
+from uuid import uuid4
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,6 +31,8 @@ from core.web_search import WebSearchService
 from core.goal_manager import GoalManager
 from core.execution_approval import ExecutionApprovalStore
 from core.channel_task_queue import ChannelTaskQueue
+from core.node_registry import NodeRegistry
+from core.autonomy_state import AutonomyStateStore
 from services.feishu_adapter import FeishuAdapter
 from models.request import (
     ChatRequest,
@@ -42,11 +46,21 @@ from models.request import (
     GoalOKRRequest,
     GoalProjectRequest,
     GoalTaskRequest,
+    GoalDemoBootstrapRequest,
     GoalTaskReviewRequest,
     GoalTaskExecutionPhaseRequest,
     GoalTaskExecutionResumeRequest,
+    GoalTaskAgentProfileUpsertRequest,
     GoalDashboardNextTaskRequest,
+    GoalSupervisorDispatchRequest,
+    GoalSupervisorReviewRequest,
     GoalTaskHandoffClaimRequest,
+    GoalTaskSubagentSpawnRequest,
+    GoalTaskSubagentControlRequest,
+    AiEmployeeUpsertRequest,
+    AiEmployeeDeleteRequest,
+    AiSkillPresetUpsertRequest,
+    AiSkillPresetDeleteRequest,
     ExecutionApprovalRequest,
     ExecutionApprovalDecisionRequest,
     ChannelInboundMessageRequest,
@@ -55,6 +69,9 @@ from models.request import (
     FeishuConfigUpdateRequest,
     FeishuConfigTestRequest,
     VisionNextActionRequest,
+    NodeRegisterRequest,
+    NodeHeartbeatRequest,
+    NodeSelectRequest,
 )
 from models.response import ChatResponse, MemoryResponse
 
@@ -67,6 +84,35 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+_STARTUP_PROFILE_ENABLED = os.getenv("STARTUP_PROFILE", "1").strip().lower() in {"1", "true", "yes", "on"}
+_STARTUP_T0 = time.perf_counter()
+_startup_marks: list[dict] = []
+
+
+def _startup_mark(step: str) -> None:
+    if not _STARTUP_PROFILE_ENABLED:
+        return
+    now = time.perf_counter()
+    elapsed_ms = int((now - _STARTUP_T0) * 1000)
+    prev_ms = _startup_marks[-1]["elapsed_ms"] if _startup_marks else 0
+    _startup_marks.append({
+        "step": step,
+        "elapsed_ms": elapsed_ms,
+        "delta_ms": elapsed_ms - prev_ms,
+    })
+
+
+def _startup_report() -> None:
+    if not _STARTUP_PROFILE_ENABLED:
+        return
+    if not _startup_marks:
+        logger.info("启动耗时剖析已启用，但没有可用的阶段数据。")
+        return
+    parts = [f"{item['step']} +{item['delta_ms']}ms (累计 {item['elapsed_ms']}ms)" for item in _startup_marks]
+    logger.info("启动耗时剖析: %s", " | ".join(parts))
+
+
+_startup_mark("load_dotenv")
 
 # 创建 FastAPI 应用
 app = FastAPI(
@@ -97,6 +143,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+_startup_mark("fastapi_app_ready")
 
 # 初始化核心组件
 DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))
@@ -106,7 +153,11 @@ memory_manager = MemoryManager(data_dir=DATA_DIR)
 goal_manager = GoalManager(data_dir=DATA_DIR)
 approval_store = ExecutionApprovalStore(data_dir=DATA_DIR)
 channel_task_queue = ChannelTaskQueue(data_dir=DATA_DIR)
+node_registry = NodeRegistry(data_dir=DATA_DIR)
+autonomy_store = AutonomyStateStore(data_dir=DATA_DIR)
+subagent_runtime_tasks: dict[str, asyncio.Task] = {}
 FEISHU_CONFIG_PATH = DATA_DIR / "feishu_config.json"
+_startup_mark("core_stores_ready")
 
 
 def _load_feishu_config() -> dict:
@@ -170,6 +221,7 @@ feishu_adapter = FeishuAdapter(
 )
 _feishu_inbound_recent: dict[str, float] = {}
 _FEISHU_INBOUND_DEBOUNCE_SEC = max(1.0, float(os.getenv("FEISHU_INBOUND_DEBOUNCE_SEC", "8")))
+_startup_mark("feishu_adapter_ready")
 
 
 def _apply_feishu_runtime_config(config: dict) -> None:
@@ -264,12 +316,16 @@ def _build_feishu_diagnostic_checks(callback_urls: dict) -> list:
 # 4) CKS_EXTRA_SKILL_DIRS（可选，逗号分隔）
 _home_dir = Path.home()
 _additional_skill_dirs = []
-for _candidate in [
-    _home_dir / ".agents" / "skills",
-    _home_dir / ".claude" / "skills",
-]:
-    if _candidate.exists():
-        _additional_skill_dirs.append(_candidate)
+_disable_external_skills = os.getenv("CKS_DISABLE_EXTERNAL_SKILLS", "0").strip().lower() in {"1", "true", "yes", "on"}
+if not _disable_external_skills:
+    for _candidate in [
+        _home_dir / ".agents" / "skills",
+        _home_dir / ".claude" / "skills",
+    ]:
+        if _candidate.exists():
+            _additional_skill_dirs.append(_candidate)
+else:
+    logger.info("已禁用外部 Skills 目录扫描（CKS_DISABLE_EXTERNAL_SKILLS=1）")
 
 _extra_skill_dirs_raw = os.getenv("CKS_EXTRA_SKILL_DIRS", "").strip()
 if _extra_skill_dirs_raw:
@@ -281,13 +337,16 @@ if _extra_skill_dirs_raw:
 skills_loader = SkillsLoader(additional_dirs=_additional_skill_dirs)
 skill_installer = SkillInstaller(skills_dir=skills_loader.skills_dir)
 skills_loader.annotate_sources(skill_installer.get_installed_skills())
+_startup_mark("skills_loaded")
 agent = ClaudeAgent(
     api_key=os.getenv("ANTHROPIC_API_KEY"),
     memory_manager=memory_manager,
     skills_loader=skills_loader,
     skill_installer=skill_installer,
     goal_manager=goal_manager,
+    autonomy_store=autonomy_store,
 )
+_startup_mark("agent_ready")
 
 
 def _build_bound_goal_task_context(goal_task_id):
@@ -307,6 +366,7 @@ def _build_bound_goal_task_context(goal_task_id):
 
     task = rows[0]
     state = goal_manager.get_execution_state(task_id) or {}
+    profile = goal_manager.get_task_agent_profile(task_id, organization_id=task.get("organization_id")) or {}
     context_lines = [
         f"- task_id: {task_id}",
         f"- title: {task.get('title', '')}",
@@ -325,6 +385,15 @@ def _build_bound_goal_task_context(goal_task_id):
             f"- execution_state: {state.get('status', '')}",
             f"- execution_note: {state.get('note', '')}",
             f"- execution_prompt: {state.get('prompt', '')}",
+        ])
+    if profile:
+        context_lines.extend([
+            f"- agent_role: {profile.get('role', '')}",
+            f"- agent_specialty: {profile.get('specialty', '')}",
+            f"- preferred_skill: {profile.get('preferred_skill', '')}",
+            f"- skill_stack: {', '.join(profile.get('skill_stack') or [])}",
+            f"- skill_strict: {str(bool(profile.get('skill_strict'))).lower()}",
+            f"- task_seed_prompt: {profile.get('seed_prompt', '')}",
         ])
     return "\n".join(context_lines)
 
@@ -349,6 +418,27 @@ def _inject_goal_task_context(message: str, goal_task_id):
 # Auto-check office document dependencies on first startup
 def _check_office_deps():
     """Check office document packages at startup."""
+    if os.getenv("CKS_SKIP_DEPS_CHECK", "0").strip().lower() in {"1", "true", "yes", "on"}:
+        logger.info("已跳过依赖检查（CKS_SKIP_DEPS_CHECK=1）")
+        return
+
+    cache_file = DATA_DIR / "startup_deps_cache.json"
+    cache_ttl_sec = max(60, int(os.getenv("CKS_DEPS_CHECK_CACHE_TTL_SEC", str(24 * 3600))))
+    now_ts = int(time.time())
+    try:
+        if cache_file.exists():
+            cache_data = json.loads(cache_file.read_text(encoding="utf-8"))
+            checked_at = int(cache_data.get("checked_at", 0))
+            if checked_at > 0 and (now_ts - checked_at) < cache_ttl_sec:
+                logger.info(
+                    "依赖检查命中缓存（%ss 内有效，剩余 %ss）",
+                    cache_ttl_sec,
+                    max(0, cache_ttl_sec - (now_ts - checked_at)),
+                )
+                return
+    except Exception as cache_error:
+        logger.warning(f"读取依赖检查缓存失败，将继续执行检查: {cache_error}")
+
     deps = {
         "openpyxl": "openpyxl", "pptx": "python-pptx", "docx": "python-docx",
         "fitz": "PyMuPDF", "matplotlib": "matplotlib", "PIL": "Pillow",
@@ -362,6 +452,14 @@ def _check_office_deps():
             missing.append(pip_name)
 
     if not missing:
+        try:
+            cache_file.write_text(json.dumps({
+                "checked_at": now_ts,
+                "missing": [],
+                "auto_install": os.getenv("CKS_AUTO_INSTALL_DEPS", "0") == "1",
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as cache_write_error:
+            logger.warning(f"写入依赖检查缓存失败: {cache_write_error}")
         return
 
     auto_install = os.getenv("CKS_AUTO_INSTALL_DEPS", "0") == "1"
@@ -370,6 +468,14 @@ def _check_office_deps():
             "Missing office packages: %s. Auto install disabled; set CKS_AUTO_INSTALL_DEPS=1 to enable.",
             ", ".join(missing)
         )
+        try:
+            cache_file.write_text(json.dumps({
+                "checked_at": now_ts,
+                "missing": missing,
+                "auto_install": False,
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as cache_write_error:
+            logger.warning(f"写入依赖检查缓存失败: {cache_write_error}")
         return
 
     logger.info(f"Installing missing office packages: {', '.join(missing)}")
@@ -384,7 +490,17 @@ def _check_office_deps():
         except Exception as e:
             logger.warning(f"  Failed to install {pkg}: {e}")
 
+    try:
+        cache_file.write_text(json.dumps({
+            "checked_at": int(time.time()),
+            "missing": missing,
+            "auto_install": True,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as cache_write_error:
+        logger.warning(f"写入依赖检查缓存失败: {cache_write_error}")
+
 _check_office_deps()
+_startup_mark("deps_checked")
 
 
 def _deploy_helpers():
@@ -410,10 +526,13 @@ def _deploy_helpers():
                 logger.warning(f"Failed to deploy {filename}: {e}")
 
 _deploy_helpers()
+_startup_mark("helpers_deployed")
 
 logger.info("Agent SDK 初始化完成")
 logger.info(f"数据目录: {DATA_DIR.absolute()}")
 logger.info(f"已加载 Skills: {len(skills_loader.skills)} 个")
+_startup_mark("bootstrap_complete")
+_startup_report()
 
 
 def _extract_mcp_tools_from_skill_md(skill_path: Path) -> list[str]:
@@ -600,7 +719,7 @@ async def chat(request: ChatRequest):
         effective_message = _inject_goal_task_context(request.message, request.goal_task_id)
         response_mode = (request.response_mode or "").strip().lower()
         if response_mode not in {"fast", "balanced", "deep"}:
-            response_mode = "fast" if request.fast_mode else "balanced"
+            response_mode = "fast" if request.fast_mode else "fast"
         effective_use_memory = request.use_memory and response_mode != "fast"
         response = await agent.chat(
             user_id=request.user_id,
@@ -638,7 +757,7 @@ async def chat_stream(request: ChatRequest):
             effective_message = _inject_goal_task_context(request.message, request.goal_task_id)
             response_mode = (request.response_mode or "").strip().lower()
             if response_mode not in {"fast", "balanced", "deep"}:
-                response_mode = "fast" if request.fast_mode else "balanced"
+                response_mode = "fast" if request.fast_mode else "fast"
             effective_use_memory = request.use_memory and response_mode != "fast"
             async for chunk in agent.chat_stream(
                 user_id=request.user_id,
@@ -1096,6 +1215,134 @@ async def get_skills_snapshot():
 async def health():
     """健康检查（兼容路径）"""
     return await root()
+
+
+@app.get("/debug/startup-profile")
+async def startup_profile():
+    """查看后端启动耗时分解（用于性能调优）。"""
+    return {
+        "success": True,
+        "enabled": _STARTUP_PROFILE_ENABLED,
+        "total_ms": _startup_marks[-1]["elapsed_ms"] if _startup_marks else 0,
+        "steps": _startup_marks,
+    }
+
+
+@app.get("/autonomy/events")
+async def list_autonomy_events(
+    session_id: str = None,
+    goal_task_id: int = None,
+    stage: str = None,
+    limit: int = 200,
+):
+    """查询自治执行阶段事件（用于工作台回放与调试）。"""
+    try:
+        rows = autonomy_store.list_events(
+            session_id=(session_id or "").strip() or None,
+            goal_task_id=goal_task_id,
+            stage=(stage or "").strip() or None,
+            limit=limit,
+        )
+        return {"success": True, "events": rows}
+    except Exception as e:
+        logger.error(f"List autonomy events failed: {e}", exc_info=True)
+        return {"success": False, "error": str(e), "events": []}
+
+
+@app.post("/nodes/register")
+async def register_node(request: NodeRegisterRequest):
+    try:
+        node = node_registry.register(
+            node_id=request.node_id,
+            organization_id=request.organization_id,
+            display_name=request.display_name,
+            host=request.host,
+            os=request.os,
+            arch=request.arch,
+            status=request.status,
+            capabilities=request.capabilities,
+            metadata=request.metadata,
+        )
+        return {"success": True, "node": node}
+    except Exception as e:
+        logger.error(f"Register node failed: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/nodes")
+async def list_nodes(
+    organization_id: str = None,
+    status: str = None,
+    capability: str = None,
+    limit: int = 100,
+):
+    try:
+        items = node_registry.list(
+            organization_id=organization_id,
+            status=status,
+            capability=capability,
+            limit=limit,
+        )
+        return {"success": True, "items": items, "total": len(items)}
+    except Exception as e:
+        logger.error(f"List nodes failed: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/nodes/{node_id}")
+async def get_node(node_id: str):
+    try:
+        item = node_registry.get(node_id)
+        if not item:
+            return {"success": False, "error": "Node not found"}
+        return {"success": True, "node": item}
+    except Exception as e:
+        logger.error(f"Get node failed: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/nodes/select")
+async def select_node(request: NodeSelectRequest):
+    try:
+        node = node_registry.select_best_node(
+            organization_id=request.organization_id,
+            capability=request.capability,
+            preferred_os=request.preferred_os,
+        )
+        if not node:
+            return {"success": False, "error": "No suitable node found"}
+        return {"success": True, "node": node}
+    except Exception as e:
+        logger.error(f"Select node failed: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/nodes/{node_id}/heartbeat")
+async def heartbeat_node(node_id: str, request: NodeHeartbeatRequest):
+    try:
+        item = node_registry.heartbeat(
+            node_id=node_id,
+            status=request.status,
+            metadata=request.metadata,
+        )
+        if not item:
+            return {"success": False, "error": "Node not found"}
+        return {"success": True, "node": item}
+    except Exception as e:
+        logger.error(f"Node heartbeat failed: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/nodes/{node_id}/status")
+async def set_node_status(node_id: str, request: NodeHeartbeatRequest):
+    try:
+        item = node_registry.set_status(node_id=node_id, status=request.status)
+        if not item:
+            return {"success": False, "error": "Node not found"}
+        return {"success": True, "node": item}
+    except Exception as e:
+        logger.error(f"Set node status failed: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
 
 
 async def _probe_mcp_bridge(bridge_url: str) -> tuple[bool, str]:
@@ -1601,6 +1848,7 @@ async def _dispatch_channel_task_internal(
     session_id: str,
     use_memory: bool,
     message_override: str = "",
+    execution_node_id: str = "",
 ):
     """Internal helper to dispatch queued channel task through agent chat path."""
     task = channel_task_queue.get(task_id)
@@ -1609,12 +1857,22 @@ async def _dispatch_channel_task_internal(
 
     channel_task_queue.mark_status(task_id, "running")
     dispatch_message = (message_override or "").strip() or task["message"]
+    normalized_node_id = (execution_node_id or "").strip()
+    if normalized_node_id:
+        dispatch_message = (
+            f"[执行节点: {normalized_node_id}]\n"
+            "请优先按该节点能力执行任务；若节点不可用，先说明原因并给出降级方案。\n\n"
+            f"{dispatch_message}"
+        )
+    channel_response_mode = os.getenv("CHANNEL_TASK_RESPONSE_MODE", "fast").strip().lower()
+    if channel_response_mode not in {"fast", "balanced", "deep"}:
+        channel_response_mode = "fast"
     response = await agent.chat(
         user_id=user_id,
         message=dispatch_message,
         session_id=session_id,
         use_memory=use_memory,
-        response_mode="balanced",
+        response_mode=channel_response_mode,
     )
     pending_approvals = approval_store.list_requests(status="pending", limit=50, session_id=session_id)
     final_status = "waiting_approval" if pending_approvals else "completed"
@@ -1627,9 +1885,605 @@ async def _dispatch_channel_task_internal(
             "reply": response.get("message", ""),
             "tool_calls": response.get("tool_calls", []),
             "pending_approval_count": len(pending_approvals),
+            "execution_node_id": normalized_node_id,
         },
     )
     return updated, response
+
+
+def _build_subagent_prompt(
+    task_row: dict,
+    objective: str,
+    assignee: str,
+    role: str,
+    specialty: str,
+    seed_prompt: str,
+    preferred_skill: str = "",
+    skill_stack: list[str] | None = None,
+) -> str:
+    task_id = int(task_row.get("id") or 0)
+    title = str(task_row.get("title") or "").strip()
+    description = str(task_row.get("description") or "").strip()
+    kpi = str(task_row.get("kpi_title") or "").strip()
+    okr = str(task_row.get("okr_title") or "").strip()
+    project = str(task_row.get("project_title") or "").strip()
+    objective_text = objective.strip() or title or "完成交付任务"
+    profile_line = f"你是{assignee}，角色={role or '数字员工'}，专长={specialty or '通用执行'}。"
+    stack_text = "、".join([s for s in (skill_stack or []) if s]) or "无"
+    guidance = (
+        "你是可通用执行的数字员工，目标是像真实员工一样独立完成任务。"
+        "请按“计划 -> 执行 -> 校验 -> 交付”的顺序推进。"
+        "你可以主动调用可用工具（联网搜索、文件处理、桌面自动化、技能工具）。"
+        "当现有技能不够时，先用 find_skills 搜索，再用 install_skill 安装后继续执行。"
+        "如果信息不足，请先提出最多3个澄清问题；若可先做再问，优先先产出可交付初稿。"
+    )
+    return (
+        f"[子Agent执行任务]\n"
+        f"- task_id: {task_id}\n"
+        f"- KPI: {kpi}\n"
+        f"- OKR: {okr}\n"
+        f"- 项目: {project}\n"
+        f"- 任务标题: {title}\n"
+        f"- 任务描述: {description or '无'}\n"
+        f"- 执行目标: {objective_text}\n"
+        f"- 主技能偏好: {preferred_skill or '自动选择'}\n"
+        f"- 可用技能栈: {stack_text}\n"
+        f"{profile_line}\n"
+        f"{guidance}\n"
+        "交付格式要求：\n"
+        "1) 执行计划（3-5条）\n"
+        "2) 关键执行过程（含用到的工具/技能）\n"
+        "3) 最终可交付结果（可直接给用户使用）\n"
+        "4) 验收清单（如何判断完成）\n"
+        + (f"\n额外约束：{seed_prompt.strip()}\n" if seed_prompt.strip() else "")
+    )
+
+
+def _pick_subagent_response_mode(objective: str, task_row: dict) -> str:
+    text = " ".join([
+        str(objective or ""),
+        str(task_row.get("title") or ""),
+        str(task_row.get("description") or ""),
+    ]).lower()
+    heavy_keywords = [
+        "ppt", "演示", "报告", "调研", "方案", "文档", "分析", "自动化", "爬取", "数据", "总结",
+        "workflow", "analysis", "research", "slides", "report", "plan", "automation",
+    ]
+    score = sum(1 for k in heavy_keywords if k in text)
+    if len(text) > 240 or score >= 2:
+        return "deep"
+    return "balanced"
+
+
+def _has_structured_delivery_sections(message: str) -> bool:
+    text = (message or "").strip().lower()
+    if not text:
+        return False
+    required_groups = [
+        ("执行计划", "plan"),
+        ("关键执行过程", "执行过程", "process"),
+        ("最终可交付结果", "交付结果", "final deliverable", "deliverable"),
+        ("验收清单", "acceptance checklist", "acceptance"),
+    ]
+    for group in required_groups:
+        if not any(keyword.lower() in text for keyword in group):
+            return False
+    return True
+
+
+def _get_subagent_retry_policy() -> tuple[int, float]:
+    max_attempts = max(1, int(os.getenv("SUBAGENT_EXEC_MAX_ATTEMPTS", "2") or 2))
+    backoff_sec = max(0.5, float(os.getenv("SUBAGENT_EXEC_BACKOFF_SEC", "1.5") or 1.5))
+    return max_attempts, backoff_sec
+
+
+def _get_subagent_timeout_policy() -> tuple[float, float]:
+    soft_timeout = max(8.0, float(os.getenv("SUBAGENT_SOFT_TIMEOUT_SEC", "45") or 45))
+    hard_timeout = max(soft_timeout + 5.0, float(os.getenv("SUBAGENT_HARD_TIMEOUT_SEC", "120") or 120))
+    return soft_timeout, hard_timeout
+
+
+def _compose_subagent_delivery_card(
+    assignee: str,
+    objective: str,
+    risk_level: str,
+    response_mode: str,
+    attempt_used: int,
+    tool_calls_count: int,
+    used_repair: bool,
+    strict_downgraded: bool,
+    delivery: str,
+) -> str:
+    objective_text = (objective or "").strip() or "按任务要求交付"
+    flags = []
+    if used_repair:
+        flags.append("已触发交付补全")
+    if strict_downgraded:
+        flags.append("严格技能已降级为通用执行")
+    flag_text = "；".join(flags) if flags else "无"
+    header = [
+        "## 执行摘要卡",
+        f"- 负责人：{assignee}",
+        f"- 目标：{objective_text}",
+        f"- 风险等级：{risk_level}",
+        f"- 执行模式：{response_mode}",
+        f"- 重试次数：{max(0, attempt_used - 1)}（总尝试 {attempt_used} 次）",
+        f"- 工具调用数：{tool_calls_count}",
+        f"- 自动恢复：{flag_text}",
+        "",
+        "---",
+        "",
+    ]
+    return "\n".join(header) + (delivery or "").strip()
+
+
+def _compose_subagent_failure_card(
+    assignee: str,
+    objective: str,
+    risk_level: str,
+    response_mode: str,
+    attempt_used: int,
+    tool_calls_count: int,
+    used_repair: bool,
+    strict_downgraded: bool,
+    error_text: str,
+) -> str:
+    objective_text = (objective or "").strip() or "按任务要求交付"
+    return "\n".join([
+        "## 执行失败恢复卡",
+        f"- 负责人：{assignee}",
+        f"- 目标：{objective_text}",
+        f"- 风险等级：{risk_level}",
+        f"- 执行模式：{response_mode}",
+        f"- 已尝试次数：{max(1, attempt_used)}",
+        f"- 工具调用数：{tool_calls_count}",
+        f"- 过程恢复：{'是' if (used_repair or strict_downgraded) else '否'}",
+        "",
+        "### 失败原因",
+        error_text or "未知错误",
+        "",
+        "### 建议下一步",
+        "1) 检查任务输入是否完整（输入信息/期望输出）。",
+        "2) 若涉及技能工具，先确认技能可用并重试。",
+        "3) 若涉及外部系统，先验证网络/权限后再执行。",
+    ])
+
+
+async def _call_subagent_chat_with_timeout(
+    run_id: str,
+    assignee: str,
+    payload: dict,
+) -> dict:
+    soft_timeout, hard_timeout = _get_subagent_timeout_policy()
+    task = asyncio.create_task(agent.chat(**payload))
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=soft_timeout)
+    except asyncio.TimeoutError:
+        goal_manager.append_subagent_run_event(
+            run_id,
+            "clarify",
+            f"{assignee} 执行超时预警（>{int(soft_timeout)}s），继续等待结果。",
+            payload={"soft_timeout_sec": soft_timeout, "hard_timeout_sec": hard_timeout},
+        )
+        remain = max(1.0, hard_timeout - soft_timeout)
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), timeout=remain)
+        except asyncio.TimeoutError as timeout_err:
+            task.cancel()
+            raise RuntimeError(f"subagent_hard_timeout>{int(hard_timeout)}s") from timeout_err
+
+
+def _assess_subagent_risk(task_row: dict, objective: str) -> tuple[str, str]:
+    text = " ".join([
+        str(task_row.get("title") or ""),
+        str(task_row.get("description") or ""),
+        str(objective or ""),
+    ]).lower()
+    high_keywords = [
+        "删除", "清空", "格式化", "rm ", "drop table", "转账", "打款", "付款", "支付", "提现",
+        "密码", "验证码", "token", "secret", "批量发送", "群发",
+    ]
+    medium_keywords = [
+        "邮件", "发信", "发布", "导出", "写文件", "下载", "安装", "执行脚本", "run command",
+    ]
+    if any(keyword in text for keyword in high_keywords):
+        return "high", "任务含高风险关键词（资金/删除/凭据/群发等）"
+    if any(keyword in text for keyword in medium_keywords):
+        return "medium", "任务涉及外发/安装/文件落盘等中风险动作"
+    return "low", "常规内容与分析任务"
+
+
+async def _wait_subagent_approval(
+    run_id: str,
+    task_id: int,
+    organization_id: str,
+    objective: str,
+    risk_level: str,
+    risk_reason: str,
+) -> tuple[bool, str]:
+    require_levels = {
+        level.strip().lower()
+        for level in os.getenv("SUBAGENT_APPROVAL_LEVELS", "high").split(",")
+        if level.strip()
+    }
+    auto_approve = os.getenv("SUBAGENT_AUTO_APPROVE", "0").strip().lower() in {"1", "true", "yes", "on"}
+    if auto_approve or risk_level not in require_levels:
+        return True, "skip"
+
+    timeout_sec = max(10, int(os.getenv("SUBAGENT_APPROVAL_TIMEOUT_SEC", "120") or 120))
+    request = approval_store.create_request(
+        source="subagent_run",
+        tool_name="subagent_execute",
+        risk_level=risk_level,
+        organization_id=organization_id,
+        payload={
+            "run_id": run_id,
+            "task_id": task_id,
+            "objective": (objective or "")[:400],
+            "risk_reason": risk_reason,
+        },
+        ttl_seconds=timeout_sec,
+    )
+    request_id = str(request.get("id") or "")
+    if not request_id:
+        return False, "approval_create_failed"
+
+    goal_manager.append_subagent_run_event(
+        run_id,
+        "clarify",
+        f"检测到{risk_level}风险，等待审批后继续执行。",
+        payload={"approval_id": request_id, "risk_reason": risk_reason, "timeout_sec": timeout_sec},
+    )
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        record = approval_store.get_request(request_id) or {}
+        status = str(record.get("status") or "").lower()
+        if status == "approved":
+            return True, request_id
+        if status in {"denied", "expired"}:
+            return False, request_id
+        await asyncio.sleep(2)
+    return False, request_id
+
+
+async def _run_subagent_task_async(
+    run_id: str,
+    task_id: int,
+    organization_id: str,
+    objective: str,
+    supervisor_name: str,
+    user_id: str = "default-user",
+    auto_complete: bool = False,
+):
+    assignee = "子Agent"
+    risk_level = "unknown"
+    response_mode = "balanced"
+    objective_text = (objective or "").strip()
+    attempt_used = 0
+    tool_calls_count = 0
+    used_repair = False
+    strict_downgraded = False
+    try:
+        task_rows = goal_manager.list_tasks(
+            organization_id=organization_id,
+            task_id=task_id,
+            limit=1,
+        )
+        if not task_rows:
+            goal_manager.set_subagent_run_status(run_id, "failed", error_text="任务不存在或无权限")
+            goal_manager.append_subagent_run_event(run_id, "fallback", "任务不存在，子Agent运行结束。")
+            return
+        task_row = task_rows[0]
+        assignee = str(task_row.get("assignee") or "").strip() or "未分配"
+        objective_text = objective.strip() or str(task_row.get("title") or "")
+        profile = goal_manager.get_task_agent_profile(task_id=task_id, organization_id=organization_id) or {}
+        preferred_skill = str(profile.get("preferred_skill") or "").strip() or None
+        skill_stack = [str(v).strip() for v in (profile.get("skill_stack") or []) if str(v).strip()]
+        skill_strict = bool(profile.get("skill_strict"))
+        role = str(profile.get("role") or "").strip()
+        specialty = str(profile.get("specialty") or "").strip()
+        seed_prompt = str(profile.get("seed_prompt") or "").strip()
+        response_mode = _pick_subagent_response_mode(objective, task_row)
+        risk_level, risk_reason = _assess_subagent_risk(task_row, objective)
+        approved, approval_ref = await _wait_subagent_approval(
+            run_id=run_id,
+            task_id=task_id,
+            organization_id=organization_id,
+            objective=objective,
+            risk_level=risk_level,
+            risk_reason=risk_reason,
+        )
+        if not approved:
+            goal_manager.set_subagent_run_status(run_id, "cancelled", error_text="审批未通过或超时，任务未执行")
+            goal_manager.append_subagent_run_event(
+                run_id,
+                "fallback",
+                "审批未通过或超时，子Agent停止执行。",
+                payload={"approval_id": approval_ref, "risk_level": risk_level, "risk_reason": risk_reason},
+            )
+            return
+
+        goal_manager.set_subagent_run_status(run_id, "running")
+        goal_manager.append_subagent_run_event(
+            run_id,
+            "planning",
+            f"{supervisor_name} 已将任务下发给 {assignee}，开始生成执行计划。",
+            payload={
+                "assignee": assignee,
+                "preferred_skill": preferred_skill or "",
+                "skill_stack": skill_stack,
+                "skill_strict": skill_strict,
+                "response_mode": response_mode,
+                "risk_level": risk_level,
+                "risk_reason": risk_reason,
+            },
+        )
+        goal_manager.update_execution_phase(
+            task_id=task_id,
+            phase="plan",
+            status="active",
+            note=f"{supervisor_name} -> {assignee} 子Agent执行中",
+            prompt=objective.strip() or str(task_row.get("title") or ""),
+        )
+
+        prompt = _build_subagent_prompt(
+            task_row=task_row,
+            objective=objective,
+            assignee=assignee,
+            role=role,
+            specialty=specialty,
+            seed_prompt=seed_prompt,
+            preferred_skill=preferred_skill or "",
+            skill_stack=skill_stack,
+        )
+        goal_manager.append_subagent_run_event(
+            run_id,
+            "execute",
+            f"{assignee} 开始执行任务（模式: {response_mode}），正在调用 Agent + Skills。",
+            payload={"step": "agent.chat", "response_mode": response_mode},
+        )
+        max_attempts, backoff_sec = _get_subagent_retry_policy()
+        response = {}
+        message = ""
+        tool_calls = []
+        for attempt in range(1, max_attempts + 1):
+            attempt_mode = "deep" if attempt == max_attempts and max_attempts > 1 else response_mode
+            try:
+                response = await _call_subagent_chat_with_timeout(
+                    run_id=run_id,
+                    assignee=assignee,
+                    payload={
+                        "user_id": user_id,
+                        "message": prompt,
+                        "session_id": f"subagent-{run_id}",
+                        "use_memory": True,
+                        "fast_mode": False,
+                        "response_mode": attempt_mode,
+                        "preferred_skill": preferred_skill,
+                        "skill_strict": skill_strict,
+                    },
+                )
+                attempt_used = attempt
+                message = str(response.get("message") or "").strip()
+                tool_calls = response.get("tool_calls") or []
+                tool_calls_count = len(tool_calls)
+                if skill_strict and "未找到你指定的技能" in message:
+                    strict_downgraded = True
+                    goal_manager.append_subagent_run_event(
+                        run_id,
+                        "fallback",
+                        f"{assignee} 指定技能不可用，自动切换为通用模式重试。",
+                        payload={"preferred_skill": preferred_skill or "", "skill_strict": True},
+                    )
+                    response = await _call_subagent_chat_with_timeout(
+                        run_id=run_id,
+                        assignee=assignee,
+                        payload={
+                            "user_id": user_id,
+                            "message": prompt,
+                            "session_id": f"subagent-{run_id}",
+                            "use_memory": True,
+                            "fast_mode": False,
+                            "response_mode": "deep",
+                            "preferred_skill": None,
+                            "skill_strict": False,
+                        },
+                    )
+                    message = str(response.get("message") or "").strip()
+                    tool_calls = response.get("tool_calls") or []
+                    tool_calls_count = len(tool_calls)
+                if message:
+                    if attempt > 1:
+                        goal_manager.append_subagent_run_event(
+                            run_id,
+                            "execute",
+                            f"{assignee} 在第 {attempt} 次重试后成功获取结果。",
+                            payload={"attempt": attempt, "response_mode": attempt_mode},
+                        )
+                    break
+                raise RuntimeError("empty_message")
+            except Exception as exec_err:
+                goal_manager.append_subagent_run_event(
+                    run_id,
+                    "fallback",
+                    f"执行尝试 {attempt}/{max_attempts} 失败：{exec_err}",
+                    payload={"attempt": attempt, "response_mode": attempt_mode},
+                )
+                if attempt >= max_attempts:
+                    raise
+                await asyncio.sleep(backoff_sec * attempt)
+
+        need_repair = (
+            not message
+            or (len(message) < 120 and response_mode == "balanced")
+            or not _has_structured_delivery_sections(message)
+        )
+        if need_repair:
+            goal_manager.append_subagent_run_event(
+                run_id,
+                "clarify",
+                f"{assignee} 正在补充执行细节，产出首版交付物。",
+                payload={
+                    "reason": "result_empty_or_unstructured",
+                    "tool_calls": tool_calls_count,
+                    "has_structured_sections": _has_structured_delivery_sections(message),
+                },
+            )
+            repair_prompt = (
+                "请继续完善当前任务，必须输出可直接验收的最终交付结果。\n"
+                "要求：必须包含四个一级标题：\n"
+                "# 执行计划\n# 关键执行过程\n# 最终可交付结果\n# 验收清单\n"
+                "如果需要外部能力，请主动搜索/安装技能并继续完成，不要只给建议。"
+            )
+            used_repair = True
+            repair = await _call_subagent_chat_with_timeout(
+                run_id=run_id,
+                assignee=assignee,
+                payload={
+                    "user_id": user_id,
+                    "message": repair_prompt,
+                    "session_id": f"subagent-{run_id}",
+                    "use_memory": True,
+                    "fast_mode": False,
+                    "response_mode": "deep",
+                    "preferred_skill": preferred_skill,
+                    "skill_strict": skill_strict,
+                },
+            )
+            repair_message = str(repair.get("message") or "").strip()
+            if repair_message:
+                message = repair_message
+                tool_calls_count = len(repair.get("tool_calls") or [])
+        if not message:
+            message = "子Agent执行已完成，但未返回文本结果。"
+        final_message = _compose_subagent_delivery_card(
+            assignee=assignee,
+            objective=objective.strip() or str(task_row.get("title") or ""),
+            risk_level=risk_level,
+            response_mode=response_mode,
+            attempt_used=max(attempt_used, 1),
+            tool_calls_count=tool_calls_count,
+            used_repair=used_repair,
+            strict_downgraded=strict_downgraded,
+            delivery=message,
+        )
+
+        goal_manager.append_subagent_run_event(
+            run_id,
+            "verify",
+            f"{assignee} 已完成执行，正在进行交付前校验。",
+            payload={
+                "reply_len": len(final_message),
+                "attempt_used": max(attempt_used, 1),
+                "tool_calls": tool_calls_count,
+                "used_repair": used_repair,
+                "strict_downgraded": strict_downgraded,
+            },
+        )
+        goal_manager.update_execution_phase(
+            task_id=task_id,
+            phase="do",
+            status="done",
+            note=f"{assignee} 已提交执行结果，可验收",
+            prompt=final_message[:1200],
+        )
+        goal_manager.append_subagent_run_event(
+            run_id,
+            "deliver",
+            f"{assignee} 已提交可验收结果。",
+            payload={
+                "attempt_used": max(attempt_used, 1),
+                "tool_calls": tool_calls_count,
+                "risk_level": risk_level,
+            },
+        )
+        if auto_complete:
+            goal_manager.complete_task(task_id)
+            goal_manager.append_subagent_run_event(
+                run_id,
+                "deliver",
+                "任务状态已自动标记为 done（待验收）。",
+            )
+        goal_manager.set_subagent_run_status(run_id, "succeeded", result_text=final_message)
+    except asyncio.CancelledError:
+        goal_manager.set_subagent_run_status(run_id, "cancelled", error_text="运行被取消")
+        goal_manager.append_subagent_run_event(run_id, "fallback", "任务运行已取消。")
+        raise
+    except Exception as e:
+        logger.error(f"Subagent run failed ({run_id}): {e}", exc_info=True)
+        failure_card = _compose_subagent_failure_card(
+            assignee=assignee,
+            objective=objective_text,
+            risk_level=risk_level,
+            response_mode=response_mode,
+            attempt_used=max(attempt_used, 1),
+            tool_calls_count=tool_calls_count,
+            used_repair=used_repair,
+            strict_downgraded=strict_downgraded,
+            error_text=str(e),
+        )
+        goal_manager.set_subagent_run_status(
+            run_id,
+            "failed",
+            result_text=failure_card,
+            error_text=str(e),
+        )
+        goal_manager.append_subagent_run_event(
+            run_id,
+            "fallback",
+            f"执行失败，已进入退路流程：{e}",
+            payload={
+                "attempt_used": max(attempt_used, 1),
+                "tool_calls": tool_calls_count,
+                "risk_level": risk_level,
+            },
+        )
+    finally:
+        subagent_runtime_tasks.pop(run_id, None)
+
+
+def _infer_channel_task_node_capability(task: dict) -> str:
+    """Infer desired node capability for channel task execution."""
+    metadata = task.get("metadata") or {}
+    explicit = str(
+        metadata.get("execution_capability")
+        or metadata.get("node_capability")
+        or ""
+    ).strip().lower()
+    if explicit in {"desktop", "terminal", "vision"}:
+        return explicit
+
+    text = " ".join(
+        [
+            str(task.get("message") or ""),
+            str(metadata.get("intent") or ""),
+            str(metadata.get("tags") or ""),
+        ]
+    ).lower()
+    if any(token in text for token in ["terminal", "shell", "命令", "脚本", "deploy", "git", "后端"]):
+        return "terminal"
+    if any(token in text for token in ["vision", "截图", "图像", "ocr", "识别", "screen"]):
+        return "vision"
+    return "desktop"
+
+
+def _resolve_channel_task_execution_node(task: dict, requested_node_id: str = "") -> str:
+    normalized_node_id = (requested_node_id or "").strip()
+    if normalized_node_id:
+        return normalized_node_id
+
+    metadata = task.get("metadata") or {}
+    organization_id = str(metadata.get("organization_id") or "default-org").strip() or "default-org"
+    preferred_os = str(metadata.get("preferred_os") or "").strip().lower()
+    capability = _infer_channel_task_node_capability(task)
+    selected = node_registry.select_best_node(
+        organization_id=organization_id,
+        capability=capability,
+        preferred_os=preferred_os,
+    )
+    if not selected:
+        return ""
+    return str(selected.get("node_id") or "").strip()
 
 
 def _try_writeback_goal_task_from_channel_task(task: dict, response: dict) -> None:
@@ -2797,11 +3651,13 @@ async def feishu_inbound(request: ChannelInboundMessageRequest):
         if request.auto_dispatch:
             dispatch_session_id = f"channel:{item['channel']}:{item['chat_id']}"
             try:
+                node_hint = _resolve_channel_task_execution_node(item)
                 item, response = await _dispatch_channel_task_internal(
                     task_id=item["id"],
                     user_id=request.user_id,
                     session_id=dispatch_session_id,
                     use_memory=True,
+                    execution_node_id=node_hint,
                 )
                 _try_writeback_goal_task_from_channel_task(item, response)
                 if feishu_adapter.configured:
@@ -2856,11 +3712,13 @@ async def dispatch_channel_task(task_id: int, request: ChannelTaskDispatchReques
 
         session_id = request.session_id or f"channel:{task['channel']}:{task['chat_id']}"
         try:
+            node_hint = _resolve_channel_task_execution_node(task, request.node_id or "")
             task, response = await _dispatch_channel_task_internal(
                 task_id=task_id,
                 user_id=request.user_id,
                 session_id=session_id,
                 use_memory=request.use_memory,
+                execution_node_id=node_hint,
             )
             _try_writeback_goal_task_from_channel_task(task, response)
             if task.get("channel") == "feishu" and feishu_adapter.configured:
@@ -3019,6 +3877,132 @@ async def set_goals_dashboard_next_task(request: GoalDashboardNextTaskRequest):
         return {"success": True}
     except Exception as e:
         logger.error(f"Set goals dashboard next task failed: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/goals/supervisor/dispatch")
+async def run_goals_supervisor_dispatch(request: GoalSupervisorDispatchRequest):
+    try:
+        data = goal_manager.run_supervisor_dispatch(
+            organization_id=request.organization_id,
+            objective=request.objective,
+            max_assignees=request.max_assignees,
+            prefer_pending_review=request.prefer_pending_review,
+            supervisor_name=request.supervisor_name,
+        )
+        return {"success": True, **data}
+    except Exception as e:
+        logger.error(f"Run goals supervisor dispatch failed: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/goals/supervisor/review")
+async def run_goals_supervisor_review(request: GoalSupervisorReviewRequest):
+    try:
+        data = goal_manager.run_supervisor_review(
+            organization_id=request.organization_id,
+            window_days=request.window_days,
+            supervisor_name=request.supervisor_name,
+        )
+        return {"success": True, **data}
+    except Exception as e:
+        logger.error(f"Run goals supervisor review failed: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/goals/ai-employees")
+async def list_goals_ai_employees(organization_id: str = None):
+    try:
+        items = goal_manager.list_ai_employees(organization_id=organization_id)
+        return {"success": True, "items": items, "total": len(items)}
+    except Exception as e:
+        logger.error(f"List AI employees failed: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/goals/ai-employees/upsert")
+async def upsert_goals_ai_employee(request: AiEmployeeUpsertRequest):
+    try:
+        ok = goal_manager.upsert_ai_employee(
+            name=request.name,
+            role=request.role,
+            specialty=request.specialty,
+            primary_skill=request.primary_skill,
+            skill_stack=request.skill_stack,
+            status=request.status,
+            organization_id=request.organization_id,
+        )
+        if not ok:
+            return {"success": False, "error": "Invalid employee payload"}
+        return {"success": True}
+    except Exception as e:
+        logger.error(f"Upsert AI employee failed: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/goals/ai-employees/delete")
+async def delete_goals_ai_employee(request: AiEmployeeDeleteRequest):
+    try:
+        ok = goal_manager.delete_ai_employee(name=request.name, organization_id=request.organization_id)
+        if not ok:
+            return {"success": False, "error": "Employee not found"}
+        return {"success": True}
+    except Exception as e:
+        logger.error(f"Delete AI employee failed: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/goals/skill-presets")
+async def list_goals_skill_presets(organization_id: str = None):
+    try:
+        items = goal_manager.list_skill_presets(organization_id=organization_id)
+        return {"success": True, "items": items, "total": len(items)}
+    except Exception as e:
+        logger.error(f"List skill presets failed: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/goals/skill-presets/upsert")
+async def upsert_goals_skill_preset(request: AiSkillPresetUpsertRequest):
+    try:
+        ok = goal_manager.upsert_skill_preset(
+            preset_id=request.id,
+            name=request.name,
+            primary_skill=request.primary_skill,
+            skills=request.skills,
+            organization_id=request.organization_id,
+        )
+        if not ok:
+            return {"success": False, "error": "Invalid skill preset payload"}
+        return {"success": True}
+    except Exception as e:
+        logger.error(f"Upsert skill preset failed: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/goals/skill-presets/delete")
+async def delete_goals_skill_preset(request: AiSkillPresetDeleteRequest):
+    try:
+        ok = goal_manager.delete_skill_preset(preset_id=request.id, organization_id=request.organization_id)
+        if not ok:
+            return {"success": False, "error": "Skill preset not found"}
+        return {"success": True}
+    except Exception as e:
+        logger.error(f"Delete skill preset failed: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/goals/bootstrap/demo")
+async def bootstrap_goals_demo(request: GoalDemoBootstrapRequest):
+    try:
+        data = goal_manager.bootstrap_one_person_company_demo(
+            organization_id=request.organization_id,
+            owner_name=request.owner_name,
+            reset_existing=request.reset_existing,
+        )
+        return {"success": True, **data}
+    except Exception as e:
+        logger.error(f"Bootstrap goals demo failed: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
 
@@ -3200,6 +4184,18 @@ async def get_goal_task_execution_state(task_id: int):
         return {"success": False, "error": str(e)}
 
 
+@app.get("/goals/task/{task_id}/execution/events")
+async def get_goal_task_execution_events(task_id: int, limit: int = 50):
+    try:
+        records = goal_manager.list_execution_events(task_id=task_id, limit=limit)
+        if records is None:
+            return {"success": False, "error": "Task not found"}
+        return {"success": True, "records": records, "total": len(records)}
+    except Exception as e:
+        logger.error(f"Get task execution events failed: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
 @app.post("/goals/task/{task_id}/execution/phase")
 async def update_goal_task_execution_phase(task_id: int, request: GoalTaskExecutionPhaseRequest):
     try:
@@ -3228,6 +4224,201 @@ async def resume_goal_task_execution(task_id: int, request: GoalTaskExecutionRes
         return {"success": True, "data": data, "resume_prompt": resume_prompt}
     except Exception as e:
         logger.error(f"Resume task execution failed: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/goals/task/{task_id}/execution/readiness")
+async def get_goal_task_execution_readiness(task_id: int, organization_id: str = None):
+    try:
+        tasks = goal_manager.list_tasks(organization_id=organization_id, task_id=task_id, limit=1)
+        task = tasks[0] if tasks else None
+        if not task:
+            return {"success": False, "error": "Task not found"}
+
+        execution_state = goal_manager.get_execution_state(task_id) or {}
+        executions = _read_audit_records("execution", goal_task_id=task_id, limit=20)
+        errors = _read_audit_records("error", goal_task_id=task_id, limit=20)
+        has_execution = len(executions) > 0
+        note = str(execution_state.get("note") or "").strip()
+        prompt = str(execution_state.get("last_prompt") or "").strip()
+        has_context = bool(note or prompt)
+        task_status = (task.get("status") or "").strip().lower()
+        review_status = (task.get("review_status") or "").strip().lower()
+        is_already_done = task_status == "done" and review_status in {"pending", "accepted"}
+
+        checks = [
+            {"key": "has_execution_traces", "ok": has_execution, "detail": f"audit executions={len(executions)}"},
+            {"key": "has_execution_context", "ok": has_context, "detail": "execution note/prompt present"},
+            {"key": "not_blocked_by_recent_errors", "ok": len(errors) == 0, "detail": f"audit errors={len(errors)}"},
+            {"key": "task_not_already_done", "ok": not is_already_done, "detail": f"task status={task_status}/{review_status or 'pending'}"},
+        ]
+        can_complete = all(item["ok"] for item in checks[:2]) and checks[2]["ok"]
+        return {
+            "success": True,
+            "data": {
+                "task_id": task_id,
+                "can_complete": bool(can_complete),
+                "checks": checks,
+                "execution_count": len(executions),
+                "error_count": len(errors),
+            },
+        }
+    except Exception as e:
+        logger.error(f"Get task execution readiness failed: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/goals/task/{task_id}/subagent-runs/spawn")
+async def spawn_goal_task_subagent_run(task_id: int, request: GoalTaskSubagentSpawnRequest):
+    try:
+        task_rows = goal_manager.list_tasks(
+            organization_id=request.organization_id,
+            task_id=task_id,
+            limit=1,
+        )
+        if not task_rows:
+            return {"success": False, "error": "Task not found"}
+        task_row = task_rows[0]
+        normalized_org = str(task_row.get("organization_id") or "default-org").strip() or "default-org"
+        run_id = f"run-{uuid4().hex[:12]}"
+        created = goal_manager.create_subagent_run(
+            run_id=run_id,
+            task_id=task_id,
+            organization_id=normalized_org,
+            assignee=str(task_row.get("assignee") or ""),
+            supervisor_name=request.supervisor_name,
+            objective=request.objective,
+            node_id=request.node_id,
+            parent_session_id=request.session_id,
+            metadata={
+                "auto_complete": bool(request.auto_complete),
+            },
+        )
+        if not created:
+            return {"success": False, "error": "Failed to create subagent run"}
+        runtime_task = asyncio.create_task(
+            _run_subagent_task_async(
+                run_id=run_id,
+                task_id=task_id,
+                organization_id=normalized_org,
+                objective=request.objective,
+                supervisor_name=request.supervisor_name,
+                auto_complete=bool(request.auto_complete),
+            )
+        )
+        subagent_runtime_tasks[run_id] = runtime_task
+        return {"success": True, "run": created}
+    except Exception as e:
+        logger.error(f"Spawn task subagent run failed: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/goals/task/{task_id}/subagent-runs")
+async def list_goal_task_subagent_runs(task_id: int, organization_id: str = None, limit: int = 30):
+    try:
+        task_rows = goal_manager.list_tasks(
+            organization_id=organization_id,
+            task_id=task_id,
+            limit=1,
+        )
+        if not task_rows:
+            return {"success": False, "error": "Task not found", "items": []}
+        normalized_org = str(task_rows[0].get("organization_id") or "default-org").strip() or "default-org"
+        rows = goal_manager.list_subagent_runs(
+            organization_id=normalized_org,
+            task_id=task_id,
+            limit=limit,
+        )
+        return {"success": True, "items": rows, "total": len(rows)}
+    except Exception as e:
+        logger.error(f"List task subagent runs failed: {e}", exc_info=True)
+        return {"success": False, "error": str(e), "items": []}
+
+
+@app.get("/goals/subagent-runs/{run_id}")
+async def get_goal_subagent_run(run_id: str):
+    try:
+        data = goal_manager.get_subagent_run(run_id)
+        if not data:
+            return {"success": False, "error": "Run not found"}
+        return {"success": True, "run": data}
+    except Exception as e:
+        logger.error(f"Get subagent run failed: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/goals/subagent-runs/{run_id}/events")
+async def list_goal_subagent_run_events(run_id: str, limit: int = 120):
+    try:
+        rows = goal_manager.list_subagent_run_events(run_id=run_id, limit=limit)
+        if rows is None:
+            return {"success": False, "error": "Run not found", "records": []}
+        return {"success": True, "records": rows, "total": len(rows)}
+    except Exception as e:
+        logger.error(f"List subagent run events failed: {e}", exc_info=True)
+        return {"success": False, "error": str(e), "records": []}
+
+
+@app.post("/goals/subagent-runs/{run_id}/control")
+async def control_goal_subagent_run(run_id: str, request: GoalTaskSubagentControlRequest):
+    try:
+        action = (request.action or "cancel").strip().lower()
+        if action != "cancel":
+            return {"success": False, "error": "Unsupported action"}
+        runtime_task = subagent_runtime_tasks.get(run_id)
+        if runtime_task and not runtime_task.done():
+            runtime_task.cancel()
+        reason = (request.reason or "").strip()
+        state = goal_manager.set_subagent_run_status(
+            run_id=run_id,
+            status="cancelled",
+            error_text=reason or "Cancelled by user",
+        )
+        if not state:
+            return {"success": False, "error": "Run not found"}
+        goal_manager.append_subagent_run_event(
+            run_id=run_id,
+            stage="fallback",
+            message=f"运行已取消。{reason}" if reason else "运行已取消。",
+        )
+        return {"success": True, "run": state}
+    except Exception as e:
+        logger.error(f"Control subagent run failed: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/goals/task/{task_id}/agent-profile")
+async def get_goal_task_agent_profile(task_id: int, organization_id: str = None):
+    try:
+        data = goal_manager.get_task_agent_profile(task_id=task_id, organization_id=organization_id)
+        if not data:
+            return {"success": False, "error": "Task agent profile not found"}
+        return {"success": True, "data": data}
+    except Exception as e:
+        logger.error(f"Get goal task agent profile failed: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/goals/task/{task_id}/agent-profile/upsert")
+async def upsert_goal_task_agent_profile(task_id: int, request: GoalTaskAgentProfileUpsertRequest):
+    try:
+        ok = goal_manager.upsert_task_agent_profile(
+            task_id=task_id,
+            organization_id=request.organization_id,
+            assignee=request.assignee,
+            role=request.role,
+            specialty=request.specialty,
+            preferred_skill=request.preferred_skill,
+            skill_stack=request.skill_stack,
+            skill_strict=request.skill_strict,
+            seed_prompt=request.seed_prompt,
+        )
+        if not ok:
+            return {"success": False, "error": "Task not found or invalid profile payload"}
+        data = goal_manager.get_task_agent_profile(task_id=task_id, organization_id=request.organization_id)
+        return {"success": True, "data": data}
+    except Exception as e:
+        logger.error(f"Upsert goal task agent profile failed: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
 
@@ -3274,18 +4465,28 @@ def main():
     """启动服务"""
     host = os.getenv("HOST", "127.0.0.1")
     port = int(os.getenv("PORT", 7860))
-    reload = os.getenv("RELOAD", "1") == "1"
+    reload = os.getenv("RELOAD", "0") == "1"
 
     logger.info(f"启动 Agent SDK 服务: http://{host}:{port} (reload={reload})")
 
-    uvicorn.run(
-        "main:app",
-        host=host,
-        port=port,
-        log_level="info",
-        reload=reload,
-        reload_dirs=[str(Path(__file__).parent)],
-    )
+    # 直接传入 app 对象，避免 `main:app` 再次导入模块导致初始化日志/耗时重复。
+    if reload:
+        uvicorn.run(
+            "main:app",
+            host=host,
+            port=port,
+            log_level="info",
+            reload=True,
+            reload_dirs=[str(Path(__file__).parent)],
+        )
+    else:
+        uvicorn.run(
+            app,
+            host=host,
+            port=port,
+            log_level="info",
+            reload=False,
+        )
 
 
 if __name__ == "__main__":

@@ -30,7 +30,7 @@ const navItems: NavItem[] = [
     icon: <Target className="h-5 w-5" />
   },
   {
-    name: '看板',
+    name: '一人公司',
     path: '/board',
     icon: <LayoutDashboard className="h-5 w-5" />
   },

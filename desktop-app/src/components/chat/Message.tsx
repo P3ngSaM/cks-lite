@@ -40,6 +40,28 @@ export const Message = memo(({ message }: MessageProps) => {
       .trim()
   }, [message.content])
 
+  const displayContent = useMemo(() => {
+    if (isUser || !cleanContent) return cleanContent
+    // Keep explicit markdown structure untouched.
+    const hasStructuredMarkdown =
+      /```/.test(cleanContent) ||
+      /^\s{0,3}#{1,6}\s/m.test(cleanContent) ||
+      /^\s*[-*+]\s/m.test(cleanContent) ||
+      /^\s*\d+\.\s/m.test(cleanContent)
+    if (hasStructuredMarkdown) return cleanContent
+
+    // Auto-split long assistant paragraphs into readable chunks.
+    let formatted = cleanContent
+      .replace(/([。！？!?])([^\n])/g, '$1\n\n$2')
+      .replace(/([；;])([^\n])/g, '$1\n$2')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim()
+
+    // Keep title marker visually separated.
+    formatted = formatted.replace(/\s+(##\s)/g, '\n\n$1')
+    return formatted
+  }, [isUser, cleanContent])
+
   return (
     <div className={cn('flex gap-4 px-6 py-4', isUser ? 'justify-end' : 'justify-start')}>
       <div className={cn('flex gap-3 max-w-[75%]', isUser ? 'flex-row-reverse' : 'flex-row')}>
@@ -148,13 +170,13 @@ export const Message = memo(({ message }: MessageProps) => {
                 <div className="flex items-center gap-2">
                   <LoadingDots />
                 </div>
-              ) : cleanContent ? (
+              ) : displayContent ? (
                 <div
                   className={cn('prose prose-sm max-w-none', isUser ? 'prose-neutral' : 'prose-invert')}
                   style={{ fontSize: '14px', lineHeight: '1.6' }}
                 >
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{cleanContent}</ReactMarkdown>
-                  {isSending && cleanContent && <span className="inline-block w-2 h-4 bg-white/60 animate-pulse ml-0.5" />}
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayContent}</ReactMarkdown>
+                  {isSending && displayContent && <span className="inline-block w-2 h-4 bg-white/60 animate-pulse ml-0.5" />}
                 </div>
               ) : null}
             </div>

@@ -12,7 +12,7 @@ class ChatRequest(BaseModel):
     message: str = Field(..., description="User message")
     session_id: str = Field(default="default", description="Session ID")
     use_memory: bool = Field(default=True, description="Whether to use memory")
-    fast_mode: bool = Field(default=False, description="Enable low-latency mode with lighter context/tool budget")
+    fast_mode: bool = Field(default=True, description="Enable low-latency mode with lighter context/tool budget")
     response_mode: Optional[str] = Field(default=None, description="Response mode: fast|balanced|deep")
     goal_task_id: Optional[int] = Field(default=None, description="Bound goal task ID for auto writeback")
     preferred_skill: Optional[str] = Field(default=None, description="Preferred skill name for this turn")
@@ -80,6 +80,12 @@ class GoalTaskRequest(BaseModel):
     department: str = Field(default="", description="Task department")
 
 
+class GoalDemoBootstrapRequest(BaseModel):
+    organization_id: Optional[str] = Field(default=None, description="Organization ID")
+    owner_name: str = Field(default="Sam", description="One-person company owner")
+    reset_existing: bool = Field(default=False, description="Whether to clear existing organization data first")
+
+
 class GoalTaskReviewRequest(BaseModel):
     decision: str = Field(..., description="Review decision: accept|reject")
     reason: str = Field(default="", description="Review reason")
@@ -97,15 +103,82 @@ class GoalTaskExecutionResumeRequest(BaseModel):
     note: str = Field(default="", description="Optional resume note")
 
 
+class GoalTaskAgentProfileUpsertRequest(BaseModel):
+    organization_id: Optional[str] = Field(default=None, description="Organization ID")
+    assignee: str = Field(default="", description="Assignee name")
+    role: str = Field(default="", description="Employee role")
+    specialty: str = Field(default="", description="Employee specialty")
+    preferred_skill: str = Field(default="", description="Preferred skill name")
+    skill_stack: List[str] = Field(default_factory=list, description="Skill stack")
+    skill_strict: bool = Field(default=False, description="Whether to enforce strict skill policy")
+    seed_prompt: str = Field(default="", description="Optional task seed prompt")
+
+
 class GoalDashboardNextTaskRequest(BaseModel):
     organization_id: Optional[str] = Field(default=None, description="Organization ID")
     assignee: str = Field(..., description="Assignee name")
     task_id: int = Field(..., description="Preferred next task id for this assignee")
 
 
+class GoalSupervisorDispatchRequest(BaseModel):
+    organization_id: Optional[str] = Field(default=None, description="Organization ID")
+    objective: str = Field(default="", description="Supervisor objective")
+    max_assignees: int = Field(default=8, description="Max assignees to dispatch in one cycle")
+    prefer_pending_review: bool = Field(default=True, description="Prefer tasks pending review first")
+    supervisor_name: str = Field(default="Supervisor-Agent", description="Supervisor identity")
+
+
+class GoalSupervisorReviewRequest(BaseModel):
+    organization_id: Optional[str] = Field(default=None, description="Organization ID")
+    window_days: int = Field(default=7, description="Review window in days")
+    supervisor_name: str = Field(default="Supervisor-Agent", description="Supervisor identity")
+
+
 class GoalTaskHandoffClaimRequest(BaseModel):
     owner: str = Field(default="manager", description="Human owner taking over the rejected task")
     note: str = Field(default="", description="Optional handoff claim note")
+
+
+class GoalTaskSubagentSpawnRequest(BaseModel):
+    organization_id: Optional[str] = Field(default=None, description="Organization ID")
+    objective: str = Field(default="", description="Execution objective override")
+    supervisor_name: str = Field(default="Supervisor-Agent", description="Supervisor identity")
+    session_id: str = Field(default="", description="Parent session id")
+    node_id: str = Field(default="", description="Optional execution node id")
+    auto_complete: bool = Field(default=False, description="Whether to auto-complete the task when run succeeds")
+
+
+class GoalTaskSubagentControlRequest(BaseModel):
+    action: str = Field(default="cancel", description="Supported action: cancel")
+    reason: str = Field(default="", description="Optional cancel reason")
+
+
+class AiEmployeeUpsertRequest(BaseModel):
+    organization_id: Optional[str] = Field(default=None, description="Organization ID")
+    name: str = Field(..., description="Employee name")
+    role: str = Field(default="", description="Employee role")
+    specialty: str = Field(default="", description="Employee specialty")
+    primary_skill: str = Field(default="", description="Primary skill")
+    skill_stack: List[str] = Field(default_factory=list, description="Skill stack")
+    status: str = Field(default="active", description="active|paused")
+
+
+class AiEmployeeDeleteRequest(BaseModel):
+    organization_id: Optional[str] = Field(default=None, description="Organization ID")
+    name: str = Field(..., description="Employee name")
+
+
+class AiSkillPresetUpsertRequest(BaseModel):
+    organization_id: Optional[str] = Field(default=None, description="Organization ID")
+    id: str = Field(..., description="Preset ID")
+    name: str = Field(..., description="Preset name")
+    primary_skill: str = Field(default="", description="Primary skill")
+    skills: List[str] = Field(default_factory=list, description="Skill list")
+
+
+class AiSkillPresetDeleteRequest(BaseModel):
+    organization_id: Optional[str] = Field(default=None, description="Organization ID")
+    id: str = Field(..., description="Preset ID")
 
 
 class ExecutionApprovalRequest(BaseModel):
@@ -137,6 +210,7 @@ class ChannelTaskDispatchRequest(BaseModel):
     user_id: str = Field(default="default-user", description="Agent user id")
     session_id: Optional[str] = Field(default=None, description="Optional session id override")
     use_memory: bool = Field(default=True, description="Use memory for dispatch run")
+    node_id: Optional[str] = Field(default=None, description="Optional execution node id hint")
 
 
 class FeishuOutboundRequest(BaseModel):
@@ -162,6 +236,29 @@ class VisionNextActionRequest(BaseModel):
     image_path: str = Field(..., description="Screenshot path")
     goal: str = Field(..., description="Current execution goal")
     history: str = Field(default="", description="Optional previous attempts context")
+
+
+class NodeRegisterRequest(BaseModel):
+    node_id: str = Field(..., description="Unique node id")
+    organization_id: Optional[str] = Field(default=None, description="Organization ID")
+    display_name: str = Field(default="", description="Node display name")
+    host: str = Field(default="", description="Node host")
+    os: str = Field(default="", description="windows|macos|linux")
+    arch: str = Field(default="", description="x64|arm64|...")
+    status: str = Field(default="online", description="online|busy|offline")
+    capabilities: List[str] = Field(default_factory=list, description="Capability tags")
+    metadata: Dict = Field(default_factory=dict, description="Extra metadata")
+
+
+class NodeHeartbeatRequest(BaseModel):
+    status: str = Field(default="online", description="online|busy|offline")
+    metadata: Dict = Field(default_factory=dict, description="Metadata patch")
+
+
+class NodeSelectRequest(BaseModel):
+    organization_id: Optional[str] = Field(default=None, description="Organization ID")
+    capability: str = Field(default="", description="Required capability")
+    preferred_os: str = Field(default="", description="Preferred OS")
 
 
 class FeishuConfigTestRequest(BaseModel):

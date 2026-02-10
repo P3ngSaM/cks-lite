@@ -1113,3 +1113,254 @@
   - ֱͨ���ͷ�֧������䡰�����ͼ·��������������븴�̡�
 - Validation:
   - `python -m py_compile agent-sdk/core/agent.py` passed.
+
+## Continue (2026-02-09 13:20)
+- 产品定位正式切换到“一人公司运营平台”，新增规划文档：`docs/one-person-company-plan.md`。
+- 文档明确了北极星目标、P0/P1/P2 分阶段任务和演示验收标准，后续开发按该计划推进。
+
+## Continue (2026-02-09 14:05)
+- 开始落地“一人公司”方向改造（第一批）：
+  - 看板标题与核心文案改为“我的AI公司”，突出“你是老板 + 数字员工执行”。
+  - 新增 AI员工名册模块：支持角色模板招募、自定义命名、暂停/恢复、解雇、一键指派与一键拉起执行。
+  - 员工名册按组织ID本地持久化，并自动吸收已有任务负责人为员工档案。
+- 同步更新侧边栏入口文案：`看板 -> AI公司`。
+- Validation:
+  - `npm run build` in `desktop-app` passed.
+
+## Continue (2026-02-09 14:35)
+- 继续推进一人公司 P0：
+  - 新增“员工卡片一键派发并执行”：直接创建任务 -> 设为该员工下一任务 -> 自动跳转 Workbench 绑定执行。
+  - 看板“组织”相关文案统一切换为“公司空间”，减少企业组织语义偏差。
+  - 补充多处“负责人”文案为“数字员工/员工”，对齐产品定位。
+- Validation:
+  - `npm run build` in `desktop-app` passed.
+
+## Continue (2026-02-09 15:05)
+- 继续对齐“一人公司”核心流程（看板 -> 执行）：
+  - 联调入口任务新增“转派数字员工”动作：可直接选择员工并转成目标任务，自动设置下一任务并跳转 Workbench 执行。
+  - 返工池新增“一键回放”：自动打开 Workbench 并注入回放提示词（失败点/风险/修复步骤），便于演示“失败回流 -> 复盘 -> 再执行”。
+  - 看板文案继续统一（公司空间、员工语义）。
+- Validation:
+  - `npm run build` in `desktop-app` passed.
+
+## Continue (2026-02-09 15:40)
+- 看板与工作台联动继续增强：
+  - 看板联调任务卡新增“转派成功状态回显”（显示派发员工、目标任务ID、时间）。
+  - Workbench 新增任务级 SOP 快捷动作：
+    - 回写任务
+    - 一键回放审计
+    - 转人工到看板（自动标记为 reject 并跳转 AI公司看板）
+- Validation:
+  - `npm run build` in `desktop-app` passed.
+
+## Continue (2026-02-09 16:05)
+- 继续完善“失败回流可见性”：
+  - Board 支持 `task_id` 深链定位：从 URL 读取任务ID后自动定位到对应员工与任务气泡，并高亮显示。
+  - Workbench“转人工到看板”现在携带 `task_id + assignee + organization_id` 跳转，确保老板落地页就看到被转人工的那条任务。
+  - Board 联调卡新增跨空间参数接管（`organization_id`），避免跨空间演示时看错数据。
+- Validation:
+  - `npm run build` in `desktop-app` passed.
+
+## Continue (2026-02-09 16:25)
+- 继续增强演示可视化（任务强定位）：
+  - Board 增加任务自动滚动定位：带 `task_id` 进入后自动滚动到目标任务区域。
+  - 被定位任务增加高亮脉冲效果（返工池卡片 / 员工任务气泡 / 任务详情卡 / 员工总览行）。
+  - 目标任务高亮使用 `data-task-id` 与 `data-highlight-task-id` 统一锚点，方便后续扩展定位动画。
+- Validation:
+  - `npm run build` in `desktop-app` passed.
+
+## Continue (2026-02-09 16:50)
+- 按“不要再扣细节，聚焦目标链路串联”推进：
+  - Workbench 新增“目标链路面板”，实时展示当前任务所属 KPI / OKR / 项目 / 任务。
+  - 增加任务动作闭环：标记任务完成、验收通过（回流链路进度）、转人工处理。
+  - 保留回写与回放按钮，形成“执行 -> 验收 -> 回流/转人工”完整 SOP。
+- Validation:
+  - `npm run build` in `desktop-app` passed.
+
+## Continue (2026-02-09 17:10)
+- 按“任务-项目-OKR-KPI 串联”继续推进（避免继续打磨细枝末节）：
+  - Goals 页面新增“目标链路驾驶舱”：按项目聚合展示 KPI/OKR/项目路径、任务总量、待验收、驳回、进行中、验收通过率。
+  - 驾驶舱支持“定位层级”与“一键拉起下一任务”，把管理视图直接连接到执行视图（Workbench）。
+  - 串联目标：让老板在一个视图中看到“任务状态如何影响项目、OKR、KPI”。
+- Validation:
+  - `npm run build` in `desktop-app` passed.
+
+## Continue (2026-02-09 17:30)
+- 继续推进“任务-项目-OKR-KPI 串联”的执行闭环：
+  - Goals 目标链路驾驶舱新增“生成今日执行队列”按钮。
+  - 逻辑：按风险分从高到低选择项目链路中的下一任务，调用 `setDashboardNextTask` 批量下发给负责人。
+  - 下发后展示“今日执行队列”清单，并可一键进入对应 Workbench 执行。
+- Validation:
+  - `npm run build` in `desktop-app` passed.
+
+## Continue (2026-02-09 17:50)
+- 继续强化“管理决策 -> 执行落地”速度：
+  - Goals 驾驶舱新增“一键批量拉起”：
+    - 按员工分组读取今日执行队列
+    - 批量创建 Workbench 会话并绑定任务/空间
+    - 自动打开第一条会话，进入执行态
+  - 目标：让老板在目标页一键把当天任务推进到执行面。
+- Validation:
+  - `npm run build` in `desktop-app` passed.
+
+## Continue (2026-02-09 18:10)
+- 对齐“一个Agent + 不同Skill = 不同职能员工”模型：
+  - AI员工模板新增 `primarySkill`（主技能）字段，并在员工卡展示 `Agent + Skill` 组合。
+  - 看板发起执行（一键拉起、派单后自动进入、返工接手、入口任务转派）统一注入 Workbench 技能预设：
+    - 写入 `cks.workbench.preferredSkill`
+    - 关闭严格模式（保留补充技能能力）
+    - 写入角色化 seedPrompt
+  - 目标：让“员工职能差异”由技能策略决定，而不是仅靠文案。
+- Validation:
+  - `npm run build` in `desktop-app` passed.
+
+## Continue (2026-02-09 18:40)
+- 按“一个Agent + 不同Skill = 不同职能员工”继续推进员工模型：
+  - AI员工模型新增 `skillStack`（技能栈），支持主技能 + 组合技能。
+  - 员工模块完成 CRUD：
+    - 新增：模板招募 + 自定义岗位/说明/技能组合
+    - 查询：员工卡展示角色、主技能、技能栈、任务负载
+    - 修改：卡片内编辑角色/说明/主技能/技能栈并保存
+    - 删除：解雇员工
+  - 员工执行预设升级：启动任务时将主技能 + 技能栈注入 Workbench seedPrompt。
+- Validation:
+  - `npm run build` in `desktop-app` passed.
+
+## Continue (2026-02-09 19:05)
+- 继续落实“员工可随意组合”并补齐可运营能力：
+  - 新增技能预设管理（按空间持久化）：可创建/删除预设，预设内容为“主技能 + 技能栈”。
+  - 招募员工支持套用预设；员工卡新增“套用预设”动作，可批量快速重配职能。
+  - 员工编辑能力增强：支持编辑岗位、岗位说明、主技能、技能栈并保存。
+- Validation:
+  - `npm run build` in `desktop-app` passed.
+
+## Continue (2026-02-09 20:30)
+- Board employee + skill preset switched to backend persistence (organization-scoped APIs) instead of localStorage-only.
+- Employee CRUD now calls /goals/ai-employees/* and keeps UI in sync after write success.
+- Skill preset CRUD now calls /goals/skill-presets/* and keeps UI in sync after write success.
+- Validation:
+  - python -m py_compile agent-sdk/main.py agent-sdk/core/goal_manager.py agent-sdk/models/request.py passed.
+  - 
+pm run build in desktop-app passed.
+
+
+## Continue (2026-02-09 20:55)
+- Stabilized Board employee/preset flows with backend-first guards:
+  - auto-sync inferred owners to backend employee table (avoid refresh loss),
+  - duplicate-name protection for employee recruit and preset create,
+  - stronger edit-save normalization (ensure primary skill stays in skill stack).
+- Validation:
+  - 
+pm run build in desktop-app passed.
+  - python -m py_compile agent-sdk/main.py agent-sdk/core/goal_manager.py agent-sdk/models/request.py passed.
+
+
+## Continue (2026-02-09 21:20)
+- Added task-level employee skill snapshot APIs and storage (	ask_agent_profiles) to stabilize execution context across page refresh/session switch.
+- Board now writes agent profile snapshot when launching task to Workbench (role/specialty/preferred skill/skill stack/seed prompt).
+- Workbench now auto-loads bound task's agent profile and applies preferred skill + strict policy + seed prompt tip.
+- Backend bound-task context now injects task agent profile to reduce 'unknown task/persona' drift during execution.
+- Validation:
+  - python -m py_compile agent-sdk/main.py agent-sdk/core/goal_manager.py agent-sdk/models/request.py passed.
+  - 
+pm run build in desktop-app passed.
+
+
+## Continue (2026-02-09 21:45)
+- Started Supervisor-Agent cluster MVP for one-person company operations.
+- Backend:
+  - Added /goals/supervisor/dispatch to run one-cycle supervisor dispatch (multi-assignee next-task scheduling).
+  - Added un_supervisor_dispatch in goal manager (priority-based task selection + execution phase writeback).
+- Frontend:
+  - Board added '����һ������' action with optional objective input and result summary.
+- Stability:
+  - task-level agent profile remains the source of execution policy in Workbench.
+- Validation:
+  - python -m py_compile agent-sdk/main.py agent-sdk/core/goal_manager.py agent-sdk/models/request.py passed.
+  - 
+pm run build in desktop-app passed.
+
+
+## Continue (2026-02-09 22:15)
+- Supervisor-Agent cluster MVP expanded:
+  - Added supervisor review API (`/goals/supervisor/review`) with assignee scoring and overall score.
+  - Board supports supervisor dispatch auto-launch option (batch create Workbench task sessions).
+  - Board supports one-click supervisor review feedback panel.
+- Validation:
+  - `python -m py_compile agent-sdk/main.py agent-sdk/core/goal_manager.py agent-sdk/models/request.py` passed.
+  - `npm run build` in `desktop-app` passed.
+
+## Continue (2026-02-09 22:35)
+- Board added Supervisor Review panel (overall score + top risk assignees + one-click remediation launch).
+- Supervisor dispatch can optionally auto-launch batch Workbench sessions with task-bound agent profile snapshots.
+- Validation:
+  - `npm run build` in `desktop-app` passed.
+  - `python -m py_compile agent-sdk/main.py agent-sdk/core/goal_manager.py agent-sdk/models/request.py` passed.
+
+## Continue (2026-02-09 22:55)
+- Added one-click supervisor remediation task generator in Board:
+  - create tasks for low-score assignees from supervisor review report,
+  - auto-assign next-task pointers for each assignee.
+- Added visible remediation trigger inside Supervisor Review panel.
+- Validation:
+  - `npm run build` in `desktop-app` passed.
+  - `python -m py_compile agent-sdk/main.py agent-sdk/core/goal_manager.py agent-sdk/models/request.py` passed.
+
+## Continue (2026-02-09 23:10)
+- Supervisor remediation upgraded:
+  - remediation task description now includes explicit acceptance criteria template,
+  - optional auto-launch first remediation task in Workbench with task-bound agent profile snapshot.
+- Validation:
+  - `npm run build` in `desktop-app` passed.
+  - `python -m py_compile agent-sdk/main.py agent-sdk/core/goal_manager.py agent-sdk/models/request.py` passed.
+
+## Continue (2026-02-09 23:25)
+- Added remediation priority strategy (P0/P1/P2) for supervisor-generated repair tasks.
+- Supervisor review panel now shows P0/P1/P2 distribution + per-assignee priority.
+- Repair task title/description now include priority for downstream execution and audit readability.
+- Validation:
+  - `npm run build` in `desktop-app` passed.
+  - `python -m py_compile agent-sdk/main.py agent-sdk/core/goal_manager.py agent-sdk/models/request.py` passed.
+
+## Continue (2026-02-09 23:45)
+- Reliability hardening for digital employees:
+  - launch execution now blocks paused employees explicitly,
+  - all Board-to-Workbench launch paths now await async launch to avoid race conditions,
+  - supervisor dispatch skips paused employees and reports skipped count.
+- Validation:
+  - `npm run build` in `desktop-app` passed.
+  - `python -m py_compile agent-sdk/main.py agent-sdk/core/goal_manager.py agent-sdk/models/request.py` passed.
+
+## Continue (2026-02-10 00:05)
+- Hardening for employee execution reliability:
+  - Added task execution readiness API (`/goals/task/{id}/execution/readiness`) using audit evidence + execution context checks.
+  - Workbench now blocks `标记完成/验收通过` when evidence is insufficient.
+  - Board launch now blocks paused employees and missing primary skills.
+  - Supervisor dispatch now reports skipped paused employees to improve observability.
+- Validation:
+  - `npm run build` in `desktop-app` passed.
+  - `python -m py_compile agent-sdk/main.py agent-sdk/core/goal_manager.py agent-sdk/models/request.py` passed.
+
+## Continue (2026-02-10 00:25)
+- Workbench now displays task execution readiness (green/yellow/red) with check breakdown before completion/review actions.
+- Added readiness backend API and frontend client typing/service methods for stable completion gating.
+- Validation:
+  - `npm run build` in `desktop-app` passed.
+  - `python -m py_compile agent-sdk/main.py agent-sdk/core/goal_manager.py agent-sdk/models/request.py` passed.
+
+## Continue (2026-02-10 00:45)
+- Added failure-memory reinjection for employee execution:
+  - Board loads recent rejected-task lessons per assignee,
+  - injects lessons into task seed prompt before Workbench launch.
+- Goal: improve first-pass success and reduce repeated mistakes during rapid trial loops.
+- Validation:
+  - `npm run build` in `desktop-app` passed.
+  - `python -m py_compile agent-sdk/main.py agent-sdk/core/goal_manager.py agent-sdk/models/request.py` passed.
+
+## Continue (2026-02-10 01:00)
+- Failure-memory reinjection upgraded to skill-aware ranking:
+  - rejected lessons are now ranked by matching current employee skill hints (primary skill + skill stack),
+  - highest-relevance failure cases are injected first into execution seed prompt.
+- Validation:
+  - `npm run build` in `desktop-app` passed.
+  - `python -m py_compile agent-sdk/main.py agent-sdk/core/goal_manager.py agent-sdk/models/request.py` passed.

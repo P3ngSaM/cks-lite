@@ -69,7 +69,7 @@ export const ChatInput = ({
             {onStop && (
               <button
                 onClick={onStop}
-                className="flex items-center gap-1 px-2 py-0.5 rounded text-xs text-neutral-400 hover:text-white bg-neutral-800 hover:bg-neutral-700 transition-colors"
+                className="cks-btn cks-btn-secondary cks-focus-ring cks-transition-fast"
               >
                 <Square className="h-3 w-3" />
                 停止
@@ -103,8 +103,8 @@ export const ChatInput = ({
               onClick={handleFileClick}
               disabled={disabled}
               className={cn(
-                'p-2 rounded-lg transition-colors',
-                'text-neutral-500 hover:text-white hover:bg-neutral-800',
+                'cks-btn cks-btn-secondary cks-focus-ring cks-transition-fast p-2',
+                'text-neutral-400 hover:text-white',
                 'disabled:opacity-40 disabled:cursor-not-allowed'
               )}
               title="上传文件"
@@ -116,9 +116,7 @@ export const ChatInput = ({
               onClick={handleSubmit}
               disabled={disabled || !message.trim()}
               className={cn(
-                'p-2 rounded-lg transition-colors',
-                'bg-white text-black',
-                'hover:bg-neutral-200',
+                'cks-btn cks-btn-primary cks-focus-ring cks-transition-fast p-2',
                 'disabled:opacity-40 disabled:cursor-not-allowed',
                 'active:scale-95'
               )}

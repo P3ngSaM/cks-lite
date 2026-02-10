@@ -494,6 +494,43 @@ export interface GoalTaskExecutionResult {
   error?: string
 }
 
+export interface GoalTaskExecutionReadiness {
+  task_id: number
+  can_complete: boolean
+  checks: Array<{
+    key: string
+    ok: boolean
+    detail: string
+  }>
+  execution_count: number
+  error_count: number
+}
+
+export interface GoalTaskExecutionReadinessResult {
+  success: boolean
+  data?: GoalTaskExecutionReadiness
+  error?: string
+}
+
+export interface GoalTaskAgentProfile {
+  task_id: number
+  organization_id?: string
+  assignee?: string
+  role?: string
+  specialty?: string
+  preferred_skill?: string
+  skill_stack?: string[]
+  skill_strict?: boolean
+  seed_prompt?: string
+  updated_at?: string
+}
+
+export interface GoalTaskAgentProfileResult {
+  success: boolean
+  data?: GoalTaskAgentProfile
+  error?: string
+}
+
 export interface GoalsDashboardSummary {
   total_tasks: number
   pending_review: number
@@ -529,6 +566,154 @@ export interface GoalsDashboardResult {
   error?: string
 }
 
+export interface GoalSupervisorDispatchItem {
+  assignee: string
+  task_id: number
+  task_title?: string
+  status?: string
+  review_status?: string
+}
+
+export interface GoalSupervisorDispatchResult {
+  success: boolean
+  organization_id?: string
+  objective?: string
+  dispatched?: GoalSupervisorDispatchItem[]
+  total?: number
+  skipped_paused?: number
+  error?: string
+}
+
+export interface GoalSupervisorReviewItem {
+  assignee: string
+  total: number
+  accepted: number
+  pending_review: number
+  in_progress: number
+  rejected: number
+  score: number
+}
+
+export interface GoalSupervisorReviewResult {
+  success: boolean
+  organization_id?: string
+  window_days?: number
+  supervisor_name?: string
+  overall_score?: number
+  total_assignees?: number
+  items?: GoalSupervisorReviewItem[]
+  error?: string
+}
+
+export interface GoalSubagentRun {
+  run_id: string
+  organization_id?: string
+  task_id: number
+  assignee?: string
+  supervisor_name?: string
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | string
+  objective?: string
+  node_id?: string
+  parent_session_id?: string
+  result_text?: string
+  error_text?: string
+  metadata?: Record<string, any>
+  created_at?: string
+  started_at?: string
+  finished_at?: string
+  updated_at?: string
+}
+
+export interface GoalSubagentRunEvent {
+  id: number
+  run_id: string
+  stage: string
+  message: string
+  payload?: Record<string, any>
+  created_at?: string
+}
+
+export interface GoalSubagentRunResult {
+  success: boolean
+  run?: GoalSubagentRun
+  error?: string
+}
+
+export interface GoalSubagentRunListResult {
+  success: boolean
+  items?: GoalSubagentRun[]
+  total?: number
+  error?: string
+}
+
+export interface GoalSubagentRunEventsResult {
+  success: boolean
+  records?: GoalSubagentRunEvent[]
+  total?: number
+  error?: string
+}
+
+export interface AiEmployeeProfile {
+  organization_id?: string
+  name: string
+  role: string
+  specialty: string
+  primary_skill: string
+  skill_stack: string[]
+  status: 'active' | 'paused' | string
+  updated_at?: string
+}
+
+export interface AiSkillPreset {
+  organization_id?: string
+  id: string
+  name: string
+  primary_skill: string
+  skills: string[]
+  updated_at?: string
+}
+
+export interface AiEmployeeListResult {
+  success: boolean
+  items?: AiEmployeeProfile[]
+  total?: number
+  error?: string
+}
+
+export interface AiSkillPresetListResult {
+  success: boolean
+  items?: AiSkillPreset[]
+  total?: number
+  error?: string
+}
+
+export interface AgentNodeProfile {
+  node_id: string
+  organization_id?: string
+  display_name?: string
+  host?: string
+  os?: string
+  arch?: string
+  status?: 'online' | 'busy' | 'offline' | string
+  capabilities?: string[]
+  metadata?: Record<string, any>
+  last_seen_at?: string
+  updated_at?: string
+}
+
+export interface AgentNodeListResult {
+  success: boolean
+  items?: AgentNodeProfile[]
+  total?: number
+  error?: string
+}
+
+export interface AgentNodeResult {
+  success: boolean
+  node?: AgentNodeProfile
+  error?: string
+}
+
 // Tool Types
 export interface Tool {
   name: string
@@ -558,6 +743,37 @@ export interface HealthStatus {
   service: string
   version: string
   skills_count: number
+}
+
+export interface StartupProfileStep {
+  step: string
+  elapsed_ms: number
+  delta_ms: number
+}
+
+export interface StartupProfileResult {
+  success: boolean
+  enabled: boolean
+  total_ms: number
+  steps: StartupProfileStep[]
+}
+
+export interface AutonomyEvent {
+  id: number
+  organization_id?: string
+  user_id?: string
+  session_id: string
+  goal_task_id?: number
+  stage: string
+  message: string
+  metadata?: string | Record<string, any>
+  created_at: string
+}
+
+export interface AutonomyEventsResult {
+  success: boolean
+  events: AutonomyEvent[]
+  error?: string
 }
 
 // Web Search Types

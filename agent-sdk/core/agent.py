@@ -139,12 +139,14 @@ class ClaudeAgent:
         base_url: str = None,
         skill_installer=None,
         goal_manager=None,
+        autonomy_store=None,
     ):
         self.api_key = api_key
         self.memory_manager = memory_manager
         self.skills_loader = skills_loader
         self.skill_installer = skill_installer
         self.goal_manager = goal_manager
+        self.autonomy_store = autonomy_store
 
         # 初始化 Claude 客户端（支持自定义 base_url）
         base_url = base_url or os.getenv("ANTHROPIC_BASE_URL")
@@ -172,6 +174,8 @@ class ClaudeAgent:
         self.session_memory_flush_state = {}  # {session_id: last_flush_cycle}
         self.memory_flush_soft_chars = int(os.getenv("MEMORY_FLUSH_SOFT_CHARS", "12000"))
         self.skill_tool_retry_max = max(1, int(os.getenv("SKILL_TOOL_RETRY_MAX", "2")))
+        self.session_autonomy_seq = {}  # {session_id: seq}
+        self.session_autonomy_last_ts = {}  # {session_id: perf_counter}
 
         # 智能记忆提取器
         self.memory_extractor = IntelligentMemoryExtractor(self.async_client)
@@ -197,6 +201,47 @@ class ClaudeAgent:
 
         base_url_info = f", Base URL: {base_url}" if base_url else ""
         logger.info(f"Claude Agent 初始化完成 (模型: {self.model}{base_url_info})")
+
+    def _autonomy_status_chunk(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        stage: str,
+        message: str,
+        goal_task_id: Optional[int] = None,
+        organization_id: Optional[str] = None,
+    ) -> str:
+        now_ts = time.perf_counter()
+        seq = int(self.session_autonomy_seq.get(session_id, 0)) + 1
+        prev_ts = self.session_autonomy_last_ts.get(session_id)
+        delta_ms = round((now_ts - prev_ts) * 1000, 1) if prev_ts else 0.0
+        self.session_autonomy_seq[session_id] = seq
+        self.session_autonomy_last_ts[session_id] = now_ts
+        metadata = {
+            "seq": seq,
+            "delta_ms": delta_ms,
+        }
+        if self.autonomy_store:
+            try:
+                self.autonomy_store.append_event(
+                    organization_id=organization_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                    goal_task_id=goal_task_id,
+                    stage=stage,
+                    message=message,
+                    metadata=json.dumps(metadata, ensure_ascii=False),
+                )
+            except Exception as e:
+                logger.warning(f"记录自治事件失败: {e}")
+        return json.dumps({
+            "type": "autonomy_status",
+            "stage": stage,
+            "message": message,
+            "seq": seq,
+            "delta_ms": delta_ms,
+        })
 
     async def _get_system_prompt(self, user_id: str, memory_context: str = "", skill_context: str = "", search_context: str = "") -> str:
         """构建系统提示词"""
@@ -257,6 +302,15 @@ class ClaudeAgent:
 4. **📋 接到复杂任务时，先列出执行计划（TODO 清单）再行动！** 每完成一步报告进度。
 5. **🔄 工具调用失败时，分析错误并用其他方法重试，不要放弃！**
 6. **🔍 搜索信息时，使用 `web_search` 工具，可多次调用不同关键词获取充足数据！** 如果第一次结果不够，换关键词再搜。
+
+## 🤖 自治执行协议（让你像“数字员工”一样主动）
+
+1. **先对齐目标再开工**：接到复杂任务时，先用 2-4 条 TODO 说明执行计划，再行动。  
+2. **信息不足先澄清**：如果关键输入缺失，先提出最多 3 个关键澄清问题；问题应短、可回答、可执行。  
+3. **执行中主动汇报**：每完成一个关键阶段，主动汇报“已完成/风险/下一步”。  
+4. **失败不等待指令**：遇到工具失败，先给替代方案并自动重试一次，再请求用户决策。  
+5. **完成即交付可验收结果**：输出时包含“结果摘要、交付物路径或链接、验收建议、可选下一步”。  
+6. **语气拟人化但专业**：像同事汇报，不要客服腔，不要空话套话。
 
 ## 核心能力
 
@@ -363,12 +417,15 @@ JSON 格式：
         import re
         message_lower = (message or "").lower()
 
+        if self._is_time_sensitive_query(message):
+            return True
+
         # 默认保守：只有明确搜索意图才联网，减少工作台对话延迟。
         aggressive = os.getenv("AUTO_WEB_SEARCH", "false").strip().lower() in {"1", "true", "yes", "on"}
 
         # 中文关键词：仅显式搜索词触发
         cn_keywords = [
-            "搜索", "查一下", "查找", "搜一下", "找一下",
+            "搜索", "查一下", "查询", "查找", "搜一下", "找一下",
             "联网搜索", "帮我搜", "帮我查", "上网查",
         ]
         for keyword in cn_keywords:
@@ -389,6 +446,62 @@ JSON 格式：
                     return True
 
         return False
+
+    @staticmethod
+    def _is_time_sensitive_query(message: str) -> bool:
+        """是否为时效性问题（如今日热点/最新新闻）"""
+        text = (message or "").strip().lower()
+        if not text:
+            return False
+        hot_words = [
+            "今天", "今日", "最新", "最近", "当前", "实时", "刚刚",
+            "新闻", "热点", "热搜", "头条", "trending", "breaking",
+        ]
+        return any(word in text for word in hot_words)
+
+    @staticmethod
+    def _needs_clarification_first(message: str) -> bool:
+        """是否应先发起澄清提问（任务目标过于模糊）"""
+        text = (message or "").strip().lower()
+        if not text:
+            return False
+        if len(text) >= 24:
+            return False
+        vague_tokens = [
+            "这个任务", "处理一下", "做一下", "搞一下", "优化一下", "看下", "看一下",
+            "安排一下", "跟进一下", "帮我弄", "先做这个",
+        ]
+        return any(token in text for token in vague_tokens)
+
+    @staticmethod
+    def _is_complex_task(message: str) -> bool:
+        """是否是需要自治推进的复杂任务"""
+        text = (message or "").strip().lower()
+        if not text:
+            return False
+        if len(text) >= 40:
+            return True
+        complex_tokens = [
+            "并且", "然后", "最后", "一并", "整理", "总结", "生成", "输出",
+            "ppt", "报告", "方案", "自动化", "飞书", "邮箱", "任务",
+            "deliver", "report", "workflow", "automation",
+        ]
+        hit = sum(1 for token in complex_tokens if token in text)
+        return hit >= 2
+
+    @staticmethod
+    def _is_retryable_tool(tool_name: str) -> bool:
+        """允许自动重试一次的低风险工具"""
+        retryable = {
+            "web_search",
+            "analyze_screen",
+            "visual_next_action",
+            "read_file",
+            "list_directory",
+            "get_file_info",
+            "capture_screen",
+        }
+        return tool_name in retryable
 
     def _extract_search_query(self, message: str) -> str:
         """从用户消息中提取精简搜索关键词"""
@@ -525,6 +638,30 @@ JSON 格式：
             f"技能工具 `{tool_name}` 执行失败。请改用内置桌面工具链继续完成："
             "list_directory -> read_file/write_file -> run_command（必要时）。"
         )
+
+    def _find_fallback_skill_tools(self, tool_name: str, limit: int = 3) -> List[str]:
+        """Find alternative skill tools for policy fallback routing."""
+        candidates: List[str] = []
+        # Prefer sibling tools from the same skill package.
+        for skill in self.skills_loader.skills:
+            names = [t.name for t in (skill.tools or [])]
+            if tool_name in names:
+                candidates = [name for name in names if name != tool_name]
+                break
+        # Fallback: same prefix family.
+        if not candidates:
+            prefix = (tool_name.split("_")[0] or "").strip().lower()
+            if prefix:
+                candidates = [
+                    name for name in self.skills_loader.registered_tools.keys()
+                    if name != tool_name and name.lower().startswith(prefix)
+                ]
+        # Keep order stable and unique.
+        deduped: List[str] = []
+        for name in candidates:
+            if name not in deduped:
+                deduped.append(name)
+        return deduped[:max(0, limit)]
 
     def _ensure_session_skill_snapshot(self, session_id: str) -> Dict:
         """
@@ -741,6 +878,8 @@ JSON 格式：
             self._ensure_session_skill_snapshot(session_id)
         except Exception as e:
             logger.warning(f"skills snapshot refresh failed: {e}")
+        clarify_needed = self._needs_clarification_first(message)
+        complex_task = self._is_complex_task(message)
 
         # 1. 检索相关记忆
         memory_context = ""
@@ -781,7 +920,7 @@ JSON 格式：
         mode = (response_mode or "").strip().lower()
         if mode not in {"fast", "balanced", "deep"}:
             mode = "fast" if fast_mode else "balanced"
-        base_auto_search_results = int(os.getenv("AUTO_SEARCH_NUM_RESULTS", "5"))
+        base_auto_search_results = int(os.getenv("AUTO_SEARCH_NUM_RESULTS", "3"))
         auto_search_enabled = mode != "fast"
         if mode == "deep":
             auto_search_results = min(base_auto_search_results + 3, 10)
@@ -812,6 +951,26 @@ JSON 格式：
         # 5. 调用 Claude API
         try:
             system_prompt = await self._get_system_prompt(user_id, memory_context, skill_context, search_context)
+            if self._is_time_sensitive_query(message):
+                system_prompt += (
+                    "\n\n## 时效信息强约束\n"
+                    "- 你正在回答时效性问题，必须优先基于联网搜索结果作答。\n"
+                    "- 输出中必须给出明确日期（如 2026-02-09）和至少 3 条来源链接。\n"
+                    "- 如果来源不一致或证据不足，先说明“信息待核验”，不要编造结论。"
+                )
+            if clarify_needed:
+                system_prompt += (
+                    "\n\n## 本轮执行策略\n"
+                    "- 本轮任务描述偏模糊，先输出 1 句任务理解 + 最多 3 个关键澄清问题。\n"
+                    "- 在用户补充前，不要直接承诺已完成。"
+                )
+            elif complex_task:
+                system_prompt += (
+                    "\n\n## 本轮执行策略（自治模式）\n"
+                    "- 先给出【任务理解】与【执行计划（2-4步）】。\n"
+                    "- 执行过程中用“已完成/进行中/下一步”主动汇报。\n"
+                    "- 结尾必须给【交付结果】【验收清单】【下一步建议】。"
+                )
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=self.max_tokens,
@@ -988,6 +1147,20 @@ JSON 格式：
                         }
                     },
                     "required": ["query"]
+                }
+            })
+            tools.append({
+                "name": "install_skill",
+                "description": "安装社区技能。通常先调用 find_skills 获取 ref，再把 ref 传给本工具完成安装。",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "ref": {
+                            "type": "string",
+                            "description": "技能引用（例如 owner/repo@path 或 curated skill ref）"
+                        }
+                    },
+                    "required": ["ref"]
                 }
             })
 
@@ -1454,6 +1627,21 @@ JSON 格式：
                 "message": f"找到 {len(skills)} 个相关技能",
                 "data": {"skills": skills}
             }
+        if tool_name == "install_skill" and self.skill_installer:
+            ref = str(tool_input.get("ref", "")).strip()
+            if not ref:
+                return {
+                    "success": False,
+                    "message": "缺少 ref 参数"
+                }
+            result = await self.skill_installer.install_skill(ref)
+            if result.get("success"):
+                try:
+                    self.skills_loader.load_skills()
+                    self.skills_loader.annotate_sources(self.skill_installer.get_installed_skills())
+                except Exception as refresh_err:
+                    logger.warning(f"技能安装后刷新清单失败: {refresh_err}")
+            return result
 
         # MCP 工具：支持 mcp__server__tool 与 mcp_server__tool 两种命名
         if tool_name.startswith("mcp__") or tool_name.startswith("mcp_"):
@@ -1520,9 +1708,32 @@ JSON 格式：
             await asyncio.sleep(0.2 * attempt)
 
         if self._is_skill_tool(tool_name) and not result.get("success", False):
+            fallback_candidates = self._find_fallback_skill_tools(tool_name)
+            auto_fallback = os.getenv("SKILL_TOOL_AUTO_FALLBACK", "1").strip().lower() in {"1", "true", "yes", "on"}
+            if auto_fallback and fallback_candidates:
+                for fallback_tool in fallback_candidates:
+                    fallback_result = await self._execute_tool(
+                        user_id=user_id,
+                        tool_name=fallback_tool,
+                        tool_input=tool_input,
+                        bound_goal_task_id=bound_goal_task_id,
+                    )
+                    if fallback_result.get("success", False):
+                        fallback_result.setdefault("data", {})
+                        if isinstance(fallback_result["data"], dict):
+                            fallback_result["data"]["policy_fallback_from"] = tool_name
+                            fallback_result["data"]["policy_fallback_tool"] = fallback_tool
+                        fallback_result["message"] = (
+                            fallback_result.get("message")
+                            or f"原工具 `{tool_name}` 失败，已自动切换 `{fallback_tool}` 执行成功。"
+                        )
+                        return fallback_result
+
             result.setdefault("data", {})
             if isinstance(result["data"], dict):
                 result["data"].setdefault("fallback_hint", self._skill_fallback_hint(tool_name))
+                if fallback_candidates:
+                    result["data"]["fallback_candidates"] = fallback_candidates
                 if attempt > 1:
                     result["data"]["policy_retry_used"] = attempt - 1
             result["message"] = result.get("message") or self._skill_fallback_hint(tool_name)
@@ -2002,6 +2213,8 @@ JSON 格式：
         mode = (response_mode or "").strip().lower()
         if mode not in {"fast", "balanced", "deep"}:
             mode = "fast" if fast_mode else "balanced"
+        clarify_needed = self._needs_clarification_first(message)
+        complex_task = self._is_complex_task(message)
 
         # 0) Skills snapshot refresh (session-scoped)
         try:
@@ -2060,6 +2273,8 @@ JSON 格式：
             force_only=bool(skill_strict and resolved_preferred),
         )
         use_tools = True  # Always enable tools (desktop tools are always available)
+        if clarify_needed:
+            use_tools = False
 
         if matched_skills:
             logger.info(f"🛠️ 检测到 Skill 意图: {matched_skills}")
@@ -2098,7 +2313,7 @@ JSON 格式：
 
         # 3. 检测是否需要联网搜索
         search_context = ""
-        base_auto_search_results = int(os.getenv("AUTO_SEARCH_NUM_RESULTS", "5"))
+        base_auto_search_results = int(os.getenv("AUTO_SEARCH_NUM_RESULTS", "3"))
         auto_search_enabled = mode != "fast"
         if mode == "deep":
             auto_search_results = min(base_auto_search_results + 3, 10)
@@ -2185,6 +2400,26 @@ JSON 格式：
         # 5. 调用 API（支持 Tool Use）
         assistant_message = ""
         system_prompt = await self._get_system_prompt(user_id, memory_context, skill_context, search_context)
+        if self._is_time_sensitive_query(message):
+            system_prompt += (
+                "\n\n## 时效信息强约束\n"
+                "- 你正在回答时效性问题，必须优先基于联网搜索结果作答。\n"
+                "- 输出中必须给出明确日期（如 2026-02-09）和至少 3 条来源链接。\n"
+                "- 如果来源不一致或证据不足，先说明“信息待核验”，不要编造结论。"
+            )
+        if clarify_needed:
+            system_prompt += (
+                "\n\n## 本轮执行策略\n"
+                "- 本轮任务描述偏模糊，先输出 1 句任务理解 + 最多 3 个关键澄清问题。\n"
+                "- 在用户补充前，不要直接承诺已完成。"
+            )
+        elif complex_task:
+            system_prompt += (
+                "\n\n## 本轮执行策略（自治模式）\n"
+                "- 先给出【任务理解】与【执行计划（2-4步）】。\n"
+                "- 执行过程中用“已完成/进行中/下一步”主动汇报。\n"
+                "- 结尾必须给【交付结果】【验收清单】【下一步建议】。"
+            )
         if desktop_message_intent:
             system_prompt += (
                 "\n\n## 📮 桌面IM发送任务（强约束）\n"
@@ -2195,6 +2430,22 @@ JSON 格式：
             )
 
         try:
+            if complex_task and not clarify_needed:
+                yield self._autonomy_status_chunk(
+                    user_id=user_id,
+                    session_id=session_id,
+                    stage="planning",
+                    message="已接管任务，先输出执行计划，再进入自动执行。",
+                    goal_task_id=goal_task_id,
+                )
+            elif clarify_needed:
+                yield self._autonomy_status_chunk(
+                    user_id=user_id,
+                    session_id=session_id,
+                    stage="clarify",
+                    message="任务信息不足，先补齐关键输入后再执行。",
+                    goal_task_id=goal_task_id,
+                )
             force_desktop_message_direct = os.getenv("FORCE_DESKTOP_MESSAGE_DIRECT", "1").strip().lower() in {"1", "true", "yes", "on"}
             if desktop_message_intent and force_desktop_message_direct:
                 channel = str(desktop_message_intent.get("channel") or "feishu").strip()
@@ -2502,7 +2753,7 @@ JSON 格式：
         if mode not in {"fast", "balanced", "deep"}:
             mode = "fast" if fast_mode else "balanced"
 
-        max_iterations = int(os.getenv("MAX_TOOL_ITERATIONS", "16"))  # 最大工具调用轮数
+        max_iterations = int(os.getenv("MAX_TOOL_ITERATIONS", "8"))  # 最大工具调用轮数
         if mode == "fast":
             max_iterations = min(max_iterations, 10)
         elif mode == "deep":
@@ -2513,7 +2764,7 @@ JSON 格式：
         elif mode == "deep":
             max_same_tool_repeats = max(max_same_tool_repeats, 3)
         max_repetition_guard_triggers = max(1, int(os.getenv("MAX_REPETITION_GUARD_TRIGGERS", "1")))
-        max_web_search_calls = max(1, int(os.getenv("MAX_WEB_SEARCH_CALLS_PER_TASK", "2")))
+        max_web_search_calls = max(1, int(os.getenv("MAX_WEB_SEARCH_CALLS_PER_TASK", "1")))
         if mode == "fast":
             max_web_search_calls = 1
         elif mode == "deep":
@@ -2522,6 +2773,14 @@ JSON 格式：
         same_tool_repeat_count = 0
         repetition_guard_triggers = 0
         web_search_calls = 0
+        retried_signatures = set()
+        yield self._autonomy_status_chunk(
+            user_id=user_id,
+            session_id=session_id,
+            stage="execute",
+            message="开始执行任务，正在调用必要工具。",
+            goal_task_id=goal_task_id,
+        )
 
         for iteration in range(max_iterations):
             iter_start = time.time()
@@ -2566,6 +2825,13 @@ JSON 格式：
                 if not tool_use_blocks:
                     total_elapsed = time.time() - task_start
                     logger.info(f"✅ 任务完成: {iteration + 1} 轮迭代, 总用时 {total_elapsed:.1f}s")
+                    yield self._autonomy_status_chunk(
+                        user_id=user_id,
+                        session_id=session_id,
+                        stage="deliver",
+                        message="执行完成，正在整理可验收交付结果。",
+                        goal_task_id=goal_task_id,
+                    )
                     yield json.dumps({"type": "done"})
                     return
 
@@ -2592,6 +2858,13 @@ JSON 格式：
                             f"{same_tool_repeat_count} 次，已触发熔断保护。"
                         )
                         logger.warning(f"🛑 {guard_error}")
+                        yield self._autonomy_status_chunk(
+                            user_id=user_id,
+                            session_id=session_id,
+                            stage="verify",
+                            message="检测到重复调用风险，已触发熔断并切换保护流程。",
+                            goal_task_id=goal_task_id,
+                        )
 
                         yield json.dumps({
                             "type": "tool_result",
@@ -2627,6 +2900,13 @@ JSON 格式：
                             "请基于已有结果继续整理答案。"
                         )
                         logger.warning(f"🛑 {guard_error}")
+                        yield self._autonomy_status_chunk(
+                            user_id=user_id,
+                            session_id=session_id,
+                            stage="verify",
+                            message="联网搜索预算已达上限，转入结果整理与交付。",
+                            goal_task_id=goal_task_id,
+                        )
                         yield json.dumps({
                             "type": "tool_result",
                             "tool": tool_name,
@@ -2664,6 +2944,13 @@ JSON 格式：
                     )
                     if tool_name == "web_search":
                         web_search_calls += 1
+                        yield self._autonomy_status_chunk(
+                            user_id=user_id,
+                            session_id=session_id,
+                            stage="verify",
+                            message="搜索结果已获取，正在交叉核验并提炼结论。",
+                            goal_task_id=goal_task_id,
+                        )
 
                     # Desktop tool: bridge through frontend
                     if result.get("_desktop_tool"):
@@ -2681,6 +2968,14 @@ JSON 格式：
                         tool_elapsed = time.time() - tool_start
                         success = desktop_result.get("success", False)
                         logger.info(f"⏱️ 工具 {tool_name}: {tool_elapsed:.1f}s ({'✅' if success else '❌'})")
+                        if not success:
+                            yield self._autonomy_status_chunk(
+                                user_id=user_id,
+                                session_id=session_id,
+                                stage="fallback",
+                                message=f"{tool_name} 执行失败，正在准备替代方案。",
+                                goal_task_id=goal_task_id,
+                            )
 
                         yield json.dumps({
                             "type": "tool_result",
@@ -2752,6 +3047,62 @@ JSON 格式：
                                     duration_ms=int(tool_elapsed * 1000),
                                 )
 
+                        if (
+                            not success
+                            and self._is_retryable_tool(tool_name)
+                            and tool_signature not in retried_signatures
+                        ):
+                            retried_signatures.add(tool_signature)
+                            yield self._autonomy_status_chunk(
+                                user_id=user_id,
+                                session_id=session_id,
+                                stage="fallback",
+                                message=f"{tool_name} 首次执行失败，正在自动切换兜底重试。",
+                                goal_task_id=goal_task_id,
+                            )
+                            retry_start = time.time()
+                            retry_result = await self._execute_tool_with_policy(
+                                user_id=user_id,
+                                tool_name=tool_name,
+                                tool_input=tool_input,
+                                bound_goal_task_id=goal_task_id,
+                            )
+                            retry_elapsed = time.time() - retry_start
+                            retry_success = bool(retry_result.get("success", False))
+                            logger.info(
+                                f"⏱️ 工具 {tool_name} 自动重试: {retry_elapsed:.1f}s ({'✅' if retry_success else '❌'})"
+                            )
+                            yield json.dumps({
+                                "type": "tool_result",
+                                "tool": tool_name,
+                                "success": retry_success,
+                                "message": retry_result.get("message") or retry_result.get("error", ""),
+                                "data": retry_result.get("data")
+                            })
+                            result = retry_result
+                            success = retry_success
+                            tool_elapsed += retry_elapsed
+                            if self.audit_logger:
+                                retry_msg = retry_result.get("message") or retry_result.get("error", "")
+                                self.audit_logger.log_execution(
+                                    user_id=user_id,
+                                    session_id=session_id,
+                                    tool_name=f"{tool_name}#retry",
+                                    tool_input=tool_input,
+                                    success=retry_success,
+                                    duration_ms=int(retry_elapsed * 1000),
+                                    message=retry_msg,
+                                )
+                                if not retry_success:
+                                    self.audit_logger.log_error(
+                                        user_id=user_id,
+                                        session_id=session_id,
+                                        tool_name=f"{tool_name}#retry",
+                                        tool_input=tool_input,
+                                        error=retry_result.get("error", "tool retry failed"),
+                                        duration_ms=int(retry_elapsed * 1000),
+                                    )
+
                         tool_results.append({
                             "type": "tool_result",
                             "tool_use_id": tool_id,
@@ -2784,6 +3135,13 @@ JSON 格式：
                 if response.stop_reason == "end_turn":
                     total_elapsed = time.time() - task_start
                     logger.info(f"✅ 任务完成: {iteration + 1} 轮迭代, 总用时 {total_elapsed:.1f}s")
+                    yield self._autonomy_status_chunk(
+                        user_id=user_id,
+                        session_id=session_id,
+                        stage="deliver",
+                        message="任务已完成，正在输出交付与验收建议。",
+                        goal_task_id=goal_task_id,
+                    )
                     yield json.dumps({"type": "done"})
                     return
 

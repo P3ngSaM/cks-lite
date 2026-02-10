@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Activity, Bot, Camera, Check, Copy, Eye, EyeOff, Lock, LogOut, Mail, Play, RefreshCw, Upload, User } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useAuthStore, useUserStore } from '@/stores'
 import { AgentService } from '@/services/agentService'
 import { TauriService, type AgentStartupDiagnostics } from '@/services/tauriService'
+import { PageHeader } from '@/components/ui'
 import { cn } from '@/utils/cn'
 
 const avatars = [
@@ -18,6 +19,13 @@ const avatars = [
   '/src/img/avatar9.png',
   '/src/img/avatar.png',
 ]
+
+const startupStepAdvice: Record<string, string> = {
+  deps_checked: '依赖检查偏慢：演示环境可设 CKS_SKIP_DEPS_CHECK=1；或依赖缓存 TTL 拉长。',
+  skills_loaded: '技能扫描偏慢：可设 CKS_DISABLE_EXTERNAL_SKILLS=1，减少外部目录扫描。',
+  agent_ready: '模型初始化偏慢：优先 fast 模式，减少冷启动时重资源初始化。',
+  helpers_deployed: '脚本部署偏慢：检查杀毒软件实时扫描，必要时将临时目录加入白名单。',
+}
 
 export const Settings = () => {
   const navigate = useNavigate()
@@ -38,6 +46,9 @@ export const Settings = () => {
   const [newPassword, setNewPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
+  const [deliverableDir, setDeliverableDir] = useState(
+    localStorage.getItem('cks.settings.deliverableDir') || ''
+  )
 
   const [isSaving, setIsSaving] = useState(false)
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
@@ -45,6 +56,7 @@ export const Settings = () => {
   const [agentDiag, setAgentDiag] = useState<AgentStartupDiagnostics | null>(null)
   const [agentDiagLoading, setAgentDiagLoading] = useState(false)
   const [agentStartLoading, setAgentStartLoading] = useState(false)
+  const [startupProfile, setStartupProfile] = useState<{ total_ms: number; steps: Array<{ step: string; delta_ms: number; elapsed_ms: number }> } | null>(null)
   const [feishuConfig, setFeishuConfig] = useState({
     app_id: '',
     app_secret: '',
@@ -72,6 +84,16 @@ export const Settings = () => {
     checks?: Array<{ id: string; title: string; status: 'pass' | 'warn' | 'fail'; detail: string; action?: string }>
     callback_urls?: { events: string; inbound: string; outbound: string }
   } | null>(null)
+  const [backendHealthy, setBackendHealthy] = useState(false)
+  const [installedSkillsCount, setInstalledSkillsCount] = useState(0)
+  const [onboardingDismissed, setOnboardingDismissed] = useState(
+    localStorage.getItem('cks.onboarding.dismissed.v1') === '1'
+  )
+  const [onboardingSmokeDone, setOnboardingSmokeDone] = useState(
+    localStorage.getItem('cks.onboarding.smoke.v1') === '1'
+  )
+  const [onboardingBusy, setOnboardingBusy] = useState(false)
+  const feishuSectionRef = useRef<HTMLDivElement>(null)
 
   const userAvatarInputRef = useRef<HTMLInputElement>(null)
   const agentAvatarInputRef = useRef<HTMLInputElement>(null)
@@ -90,9 +112,19 @@ export const Settings = () => {
     try {
       const diag = await TauriService.getAgentStartupDiagnostics()
       setAgentDiag(diag)
+      const profile = await AgentService.getStartupProfile()
+      if (profile?.success && profile.enabled) {
+        setStartupProfile({
+          total_ms: Number(profile.total_ms || 0),
+          steps: Array.isArray(profile.steps) ? profile.steps : [],
+        })
+      } else {
+        setStartupProfile(null)
+      }
     } catch (error) {
       console.error('Failed to load agent diagnostics:', error)
       setAgentDiag(null)
+      setStartupProfile(null)
     } finally {
       setAgentDiagLoading(false)
     }
@@ -127,9 +159,29 @@ export const Settings = () => {
     }
   }
 
+  const refreshOnboardingSnapshot = async () => {
+    try {
+      const health = await AgentService.checkHealth()
+      setBackendHealthy(Boolean(health?.status === 'ok'))
+      setInstalledSkillsCount(Number(health?.skills_count || 0))
+    } catch (error) {
+      console.warn('Failed to refresh onboarding snapshot:', error)
+      setBackendHealthy(false)
+    }
+    try {
+      const skills = await AgentService.listSkills()
+      if (skills?.success && Array.isArray(skills.skills)) {
+        setInstalledSkillsCount(skills.skills.length)
+      }
+    } catch {
+      // keep health-based fallback
+    }
+  }
+
   useEffect(() => {
     loadAgentDiagnostics()
     loadFeishuConfig()
+    void refreshOnboardingSnapshot()
   }, [])
 
   const handleSaveFeishuConfig = async () => {
@@ -263,6 +315,8 @@ export const Settings = () => {
         text: `联调成功：任务 #${enqueueResult.task.id} 已派发执行，请到工作台或老板看板查看回流。`,
       })
       setFeishuSmokeTaskId(enqueueResult.task.id)
+      localStorage.setItem('cks.onboarding.smoke.v1', '1')
+      setOnboardingSmokeDone(true)
     } catch (error) {
       setMessage({ type: 'error', text: `联调失败: ${String(error)}` })
     } finally {
@@ -280,6 +334,41 @@ export const Settings = () => {
     } finally {
       setAgentStartLoading(false)
       await loadAgentDiagnostics()
+      await refreshOnboardingSnapshot()
+    }
+  }
+
+  const onboardingChecks = useMemo(() => {
+    const backendReady = Boolean(agentDiag?.already_running || backendHealthy)
+    const skillsReady = installedSkillsCount >= 3
+    const feishuReady = feishuConfigured
+    const smokeReady = onboardingSmokeDone || feishuSmokeTaskId != null
+    return [
+      { id: 'backend', title: '启动后端服务', done: backendReady, hint: '确保工作台对话、技能与自动化可用' },
+      { id: 'skills', title: '准备技能基线（≥3个）', done: skillsReady, hint: `当前技能数：${installedSkillsCount}` },
+      { id: 'feishu', title: '配置飞书入口（可选）', done: feishuReady, hint: '用于手机端遥控 CKS' },
+      { id: 'smoke', title: '跑一遍联调冒烟', done: smokeReady, hint: '验证“飞书下发 → CKS执行 → 回流”' },
+    ]
+  }, [agentDiag?.already_running, backendHealthy, installedSkillsCount, feishuConfigured, onboardingSmokeDone, feishuSmokeTaskId])
+
+  const onboardingDoneCount = onboardingChecks.filter((item) => item.done).length
+  const onboardingAllDone = onboardingDoneCount === onboardingChecks.length
+
+  const runOnboardingQuickStart = async () => {
+    setOnboardingBusy(true)
+    try {
+      if (!(agentDiag?.already_running || backendHealthy)) {
+        await handleStartAgent()
+      } else {
+        await refreshOnboardingSnapshot()
+      }
+      if (installedSkillsCount < 3) {
+        setMessage({ type: 'success', text: '后端已就绪：请前往技能页安装 1-2 个常用技能后继续。' })
+      } else {
+        setMessage({ type: 'success', text: '后端与技能基线已就绪，可继续完成飞书配置与联调。' })
+      }
+    } finally {
+      setOnboardingBusy(false)
     }
   }
 
@@ -305,6 +394,13 @@ export const Settings = () => {
           content: `AI 助手名称是 ${agentName}`,
           memory_type: 'preference',
         })
+      }
+
+      const normalizedDir = deliverableDir.trim()
+      if (normalizedDir) {
+        localStorage.setItem('cks.settings.deliverableDir', normalizedDir)
+      } else {
+        localStorage.removeItem('cks.settings.deliverableDir')
       }
 
       setMessage({ type: 'success', text: '保存成功' })
@@ -359,12 +455,13 @@ export const Settings = () => {
   }
 
   return (
-    <div className="flex-1 p-6 overflow-y-auto bg-black">
-      <div className="max-w-3xl mx-auto space-y-6">
-        <div>
-          <h1 className="text-2xl font-bold text-white mb-2">设置中心</h1>
-          <p className="text-neutral-500 text-sm">管理账号、助手形象与桌面运行状态</p>
-        </div>
+    <div className="h-full overflow-y-auto bg-black p-4 md:p-6">
+      <div className="max-w-5xl mx-auto space-y-6">
+        <PageHeader
+          title="设置中心"
+          subtitle="管理账号、助手形象与桌面运行状态"
+          icon={<User className="h-5 w-5 text-cyan-300" />}
+        />
 
         {message && (
           <div
@@ -379,6 +476,102 @@ export const Settings = () => {
           </div>
         )}
 
+        {!onboardingDismissed && (
+          <div className="bg-neutral-900 border border-cyan-500/30 rounded-lg p-5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-base font-semibold text-white">首次初始化向导</h2>
+                <p className="text-xs text-neutral-400 mt-1">
+                  新用户首次安装建议先完成这 4 步：后端、技能、飞书、联调。
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs px-2 py-1 rounded border border-neutral-700 bg-neutral-800 text-neutral-200">
+                  {onboardingDoneCount}/{onboardingChecks.length} 已完成
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    localStorage.setItem('cks.onboarding.dismissed.v1', '1')
+                    setOnboardingDismissed(true)
+                  }}
+                  className="cks-btn cks-btn-secondary text-[11px]"
+                >
+                  先隐藏
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-2">
+              {onboardingChecks.map((item) => (
+                <div
+                  key={item.id}
+                  className={cn(
+                    'rounded border px-3 py-2 text-xs',
+                    item.done
+                      ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200'
+                      : 'border-neutral-700 bg-black/40 text-neutral-300'
+                  )}
+                >
+                  <div className="flex items-center gap-2">
+                    <Check className={cn('h-3.5 w-3.5', item.done ? 'text-emerald-300' : 'text-neutral-500')} />
+                    <span>{item.title}</span>
+                  </div>
+                  <div className="mt-1 text-[11px] text-neutral-400">{item.hint}</div>
+                </div>
+              ))}
+            </div>
+
+            <div className="mt-4 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={runOnboardingQuickStart}
+                disabled={onboardingBusy || onboardingAllDone}
+                className="cks-btn cks-btn-secondary border-cyan-500/40 text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-50"
+              >
+                {onboardingBusy ? '初始化中...' : onboardingAllDone ? '基础配置已完成' : '一键准备基础环境'}
+              </button>
+              <button
+                type="button"
+                onClick={() => feishuSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+                className="cks-btn cks-btn-secondary text-[12px]"
+              >
+                去配置飞书
+              </button>
+              <button
+                type="button"
+                onClick={handleRunFeishuSmoke}
+                disabled={feishuSmokeRunning}
+                className="cks-btn cks-btn-secondary text-[12px] disabled:opacity-50"
+              >
+                {feishuSmokeRunning ? '联调中...' : '运行联调冒烟'}
+              </button>
+              <button
+                type="button"
+                onClick={() => navigate('/skills')}
+                className="cks-btn cks-btn-secondary text-[12px]"
+              >
+                打开技能页
+              </button>
+            </div>
+          </div>
+        )}
+
+        {onboardingDismissed && !onboardingAllDone && (
+          <div className="flex justify-end">
+            <button
+              type="button"
+              onClick={() => {
+                localStorage.removeItem('cks.onboarding.dismissed.v1')
+                setOnboardingDismissed(false)
+              }}
+              className="cks-btn cks-btn-secondary text-[11px]"
+            >
+              显示首次初始化向导
+            </button>
+          </div>
+        )}
+
         {isTauriRuntime && (
           <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-6">
             <div className="flex items-center justify-between gap-3 mb-3">
@@ -390,7 +583,7 @@ export const Settings = () => {
                 <button
                   onClick={loadAgentDiagnostics}
                   disabled={agentDiagLoading}
-                  className="px-3 py-1.5 rounded-lg border border-neutral-700 text-xs text-neutral-300 hover:border-neutral-500 disabled:opacity-50 inline-flex items-center gap-1"
+                  className="cks-btn cks-btn-secondary disabled:opacity-50 inline-flex items-center gap-1"
                 >
                   <RefreshCw className={`h-3.5 w-3.5 ${agentDiagLoading ? 'animate-spin' : ''}`} />
                   刷新
@@ -398,7 +591,7 @@ export const Settings = () => {
                 <button
                   onClick={handleStartAgent}
                   disabled={agentStartLoading || !!agentDiag?.already_running}
-                  className="px-3 py-1.5 rounded-lg border border-blue-500/40 text-xs text-blue-300 hover:bg-blue-500/10 disabled:opacity-50 inline-flex items-center gap-1"
+                  className="cks-btn cks-btn-secondary border-blue-500/40 text-blue-300 hover:bg-blue-500/10 disabled:opacity-50 inline-flex items-center gap-1"
                 >
                   <Play className="h-3.5 w-3.5" />
                   启动后端
@@ -420,10 +613,44 @@ export const Settings = () => {
                 ))}
               </div>
             ) : null}
+
+            {startupProfile && startupProfile.steps.length > 0 ? (
+              <div className="mt-3 p-3 rounded border border-cyan-500/30 bg-cyan-500/10 text-xs">
+                <div className="flex items-center justify-between text-cyan-200">
+                  <span>启动耗时剖析</span>
+                  <span>总计 {startupProfile.total_ms}ms</span>
+                </div>
+                {(() => {
+                  const slowest = startupProfile.steps
+                    .slice()
+                    .sort((a, b) => b.delta_ms - a.delta_ms)[0]
+                  if (!slowest) return null
+                  const advice = startupStepAdvice[slowest.step]
+                  if (!advice) return null
+                  return (
+                    <div className="mt-2 rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-100">
+                      最慢阶段：{slowest.step}（+{slowest.delta_ms}ms）｜建议：{advice}
+                    </div>
+                  )
+                })()}
+                <div className="mt-2 space-y-1 text-cyan-100/90">
+                  {startupProfile.steps
+                    .slice()
+                    .sort((a, b) => b.delta_ms - a.delta_ms)
+                    .slice(0, 4)
+                    .map((step) => (
+                      <div key={step.step} className="flex items-center justify-between gap-3">
+                        <span className="truncate">{step.step}</span>
+                        <span className="whitespace-nowrap">+{step.delta_ms}ms</span>
+                      </div>
+                    ))}
+                </div>
+              </div>
+            ) : null}
           </div>
         )}
 
-        <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-6">
+        <div ref={feishuSectionRef} className="bg-neutral-900 border border-neutral-800 rounded-lg p-6">
           <div className="flex items-center justify-between gap-3 mb-4">
             <div className="flex items-center gap-2">
               <h2 className="text-lg font-semibold text-white flex items-center gap-2">
@@ -444,7 +671,7 @@ export const Settings = () => {
             <button
               onClick={loadFeishuConfig}
               disabled={feishuLoading}
-              className="px-3 py-1.5 rounded-lg border border-neutral-700 text-xs text-neutral-300 hover:border-neutral-500 disabled:opacity-50 inline-flex items-center gap-1"
+              className="cks-btn cks-btn-secondary disabled:opacity-50 inline-flex items-center gap-1"
             >
               <RefreshCw className={`h-3.5 w-3.5 ${feishuLoading ? 'animate-spin' : ''}`} />
               刷新
@@ -456,30 +683,30 @@ export const Settings = () => {
               value={feishuConfig.app_id}
               onChange={(e) => setFeishuConfig((prev) => ({ ...prev, app_id: e.target.value }))}
               placeholder="App ID"
-              className="px-3 py-2 rounded-lg bg-black text-white border border-neutral-800 focus:border-white focus:outline-none"
+              className="cks-input px-3 py-2"
             />
             <input
               value={feishuConfig.app_secret}
               onChange={(e) => setFeishuConfig((prev) => ({ ...prev, app_secret: e.target.value }))}
               placeholder="App Secret"
-              className="px-3 py-2 rounded-lg bg-black text-white border border-neutral-800 focus:border-white focus:outline-none"
+              className="cks-input px-3 py-2"
             />
             <input
               value={feishuConfig.verification_token}
               onChange={(e) => setFeishuConfig((prev) => ({ ...prev, verification_token: e.target.value }))}
               placeholder="Verification Token"
-              className="px-3 py-2 rounded-lg bg-black text-white border border-neutral-800 focus:border-white focus:outline-none"
+              className="cks-input px-3 py-2"
             />
             <input
               value={feishuConfig.encrypt_key}
               onChange={(e) => setFeishuConfig((prev) => ({ ...prev, encrypt_key: e.target.value }))}
               placeholder="Encrypt Key"
-              className="px-3 py-2 rounded-lg bg-black text-white border border-neutral-800 focus:border-white focus:outline-none"
+              className="cks-input px-3 py-2"
             />
             <select
               value={feishuConfig.domain}
               onChange={(e) => setFeishuConfig((prev) => ({ ...prev, domain: e.target.value || 'feishu' }))}
-              className="px-3 py-2 rounded-lg bg-black text-white border border-neutral-800 focus:border-white focus:outline-none"
+              className="cks-input px-3 py-2"
             >
               <option value="feishu">feishu（国内）</option>
               <option value="lark">lark（国际）</option>
@@ -488,21 +715,21 @@ export const Settings = () => {
               value={feishuConfig.allowed_senders}
               onChange={(e) => setFeishuConfig((prev) => ({ ...prev, allowed_senders: e.target.value }))}
               placeholder="允许发送者 open_id 列表（逗号分隔）"
-              className="px-3 py-2 rounded-lg bg-black text-white border border-neutral-800 focus:border-white focus:outline-none"
+              className="cks-input px-3 py-2"
             />
             <input
               type="number"
               value={feishuConfig.signature_tolerance_sec}
               onChange={(e) => setFeishuConfig((prev) => ({ ...prev, signature_tolerance_sec: Number(e.target.value || 0) }))}
               placeholder="签名时间容差（秒）"
-              className="px-3 py-2 rounded-lg bg-black text-white border border-neutral-800 focus:border-white focus:outline-none"
+              className="cks-input px-3 py-2"
             />
             <input
               type="number"
               value={feishuConfig.replay_cache_size}
               onChange={(e) => setFeishuConfig((prev) => ({ ...prev, replay_cache_size: Number(e.target.value || 32) }))}
               placeholder="重放缓存大小"
-              className="px-3 py-2 rounded-lg bg-black text-white border border-neutral-800 focus:border-white focus:outline-none"
+              className="cks-input px-3 py-2"
             />
           </div>
 
@@ -530,33 +757,33 @@ export const Settings = () => {
               value={feishuTestChatId}
               onChange={(e) => setFeishuTestChatId(e.target.value)}
               placeholder="测试 Chat ID（可空，仅鉴权）"
-              className="flex-1 min-w-[220px] px-3 py-2 rounded-lg bg-black text-white border border-neutral-800 focus:border-white focus:outline-none"
+              className="flex-1 min-w-[220px] cks-input px-3 py-2"
             />
             <button
               onClick={handleDiagnoseFeishuConfig}
               disabled={feishuDiagnosing}
-              className="px-4 py-2 rounded-lg border border-violet-500/40 text-violet-300 hover:bg-violet-500/10 disabled:opacity-50"
+              className="cks-btn cks-btn-secondary border-violet-500/40 text-violet-300 hover:bg-violet-500/10 disabled:opacity-50"
             >
               {feishuDiagnosing ? '诊断中...' : '一键诊断'}
             </button>
             <button
               onClick={handleRunFeishuSmoke}
               disabled={feishuSmokeRunning}
-              className="px-4 py-2 rounded-lg border border-fuchsia-500/40 text-fuchsia-300 hover:bg-fuchsia-500/10 disabled:opacity-50"
+              className="cks-btn cks-btn-secondary border-fuchsia-500/40 text-fuchsia-300 hover:bg-fuchsia-500/10 disabled:opacity-50"
             >
               {feishuSmokeRunning ? '联调中...' : '一键联调'}
             </button>
             <button
               onClick={handleTestFeishuConfig}
               disabled={feishuTesting}
-              className="px-4 py-2 rounded-lg border border-cyan-500/40 text-cyan-300 hover:bg-cyan-500/10 disabled:opacity-50"
+              className="cks-btn cks-btn-primary disabled:opacity-50"
             >
               {feishuTesting ? '测试中...' : '测试连通'}
             </button>
             <button
               onClick={handleSaveFeishuConfig}
               disabled={feishuSaving}
-              className="px-4 py-2 rounded-lg border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50"
+              className="cks-btn cks-btn-secondary border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50"
             >
               {feishuSaving ? '保存中...' : '保存飞书配置'}
             </button>
@@ -616,7 +843,7 @@ export const Settings = () => {
                     <code className="flex-1 truncate text-cyan-200">{feishuDiagnostics.callback_urls.events}</code>
                     <button
                       onClick={() => handleCopyText(feishuDiagnostics.callback_urls?.events || '', '事件回调地址')}
-                      className="inline-flex items-center gap-1 px-2 py-1 rounded border border-neutral-700 hover:border-neutral-500 text-neutral-200"
+                      className="cks-btn cks-btn-secondary inline-flex items-center gap-1"
                     >
                       {lastCopiedText === feishuDiagnostics.callback_urls.events ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
                       {lastCopiedText === feishuDiagnostics.callback_urls.events ? '已复制' : '复制'}
@@ -629,7 +856,7 @@ export const Settings = () => {
                     <code className="flex-1 truncate text-cyan-200">{feishuDiagnostics.callback_urls.inbound}</code>
                     <button
                       onClick={() => handleCopyText(feishuDiagnostics.callback_urls?.inbound || '', '消息注入地址')}
-                      className="inline-flex items-center gap-1 px-2 py-1 rounded border border-neutral-700 hover:border-neutral-500 text-neutral-200"
+                      className="cks-btn cks-btn-secondary inline-flex items-center gap-1"
                     >
                       {lastCopiedText === feishuDiagnostics.callback_urls.inbound ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
                       {lastCopiedText === feishuDiagnostics.callback_urls.inbound ? '已复制' : '复制'}
@@ -700,7 +927,7 @@ export const Settings = () => {
                 type="text"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                className="w-full px-4 py-2.5 rounded-lg bg-black text-white border border-neutral-800 focus:border-white focus:outline-none"
+                className="cks-input w-full px-4 py-2.5"
               />
             </div>
 
@@ -712,7 +939,7 @@ export const Settings = () => {
                   type="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  className="w-full pl-10 pr-4 py-2.5 rounded-lg bg-black text-white border border-neutral-800 focus:border-white focus:outline-none"
+                  className="cks-input w-full pl-10 pr-4 py-2.5"
                 />
               </div>
             </div>
@@ -730,7 +957,7 @@ export const Settings = () => {
                 onChange={(e) => setAgentName(e.target.value)}
                 maxLength={20}
                 placeholder="例如：Alex"
-                className="w-full px-4 py-2.5 rounded-lg bg-black text-white border border-neutral-800 focus:border-white focus:outline-none"
+                className="cks-input w-full px-4 py-2.5"
               />
             </div>
 
@@ -773,6 +1000,20 @@ export const Settings = () => {
               </div>
               <input ref={agentAvatarInputRef} type="file" accept="image/*" onChange={onUploadAvatar(setSelectedAvatar)} className="hidden" />
             </div>
+
+            <div>
+              <label className="block text-sm font-medium text-white mb-2">交付文件保存目录</label>
+              <input
+                type="text"
+                value={deliverableDir}
+                onChange={(e) => setDeliverableDir(e.target.value)}
+                placeholder="留空使用默认目录（Windows: C:\\Users\\Public\\Documents\\CKS-Deliverables）"
+                className="cks-input w-full px-4 py-2.5"
+              />
+              <div className="mt-1 text-xs text-neutral-500">
+                设置后，老板看板里的“下载 Word/PPT/TXT”会保存到该目录。
+              </div>
+            </div>
           </div>
         </div>
 
@@ -809,7 +1050,7 @@ export const Settings = () => {
                     type={showPassword ? 'text' : 'password'}
                     value={currentPassword}
                     onChange={(e) => setCurrentPassword(e.target.value)}
-                    className="w-full px-4 py-2.5 pr-12 rounded-lg bg-black text-white border border-neutral-800 focus:border-white focus:outline-none"
+                    className="cks-input w-full px-4 py-2.5 pr-12"
                   />
                   <button
                     type="button"
@@ -828,7 +1069,7 @@ export const Settings = () => {
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
                   placeholder="至少 6 位"
-                  className="w-full px-4 py-2.5 rounded-lg bg-black text-white border border-neutral-800 focus:border-white focus:outline-none"
+                  className="cks-input w-full px-4 py-2.5"
                 />
               </div>
 
@@ -838,7 +1079,7 @@ export const Settings = () => {
                   type={showPassword ? 'text' : 'password'}
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
-                  className="w-full px-4 py-2.5 rounded-lg bg-black text-white border border-neutral-800 focus:border-white focus:outline-none"
+                  className="cks-input w-full px-4 py-2.5"
                 />
               </div>
 
@@ -873,7 +1114,7 @@ export const Settings = () => {
 
         <button
           onClick={handleLogout}
-          className="w-full px-6 py-3 rounded-lg font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/50 transition-colors flex items-center justify-center gap-2"
+          className="w-full cks-btn cks-btn-danger justify-center px-6 py-3"
         >
           <LogOut className="h-5 w-5" />
           退出登录
